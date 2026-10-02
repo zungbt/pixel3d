@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { SIZE, heightAt, mulberry32, toonGradient } from './world.js';
+import { SIZE, fbm, heightAt, mulberry32, toonGradient } from './world.js';
 
-const COUNT = 135000; // ~58 blades per square unit
+const ATTEMPTS = 135000; // ~58 blades per square unit before density thinning
 const HALF = SIZE / 2 - 0.1; // just inside the ground
 const BLADE_W = 0.1;
 const BLADE_H = 0.3;
@@ -20,7 +20,38 @@ function bladeGeometry() {
   return geo;
 }
 
-export function buildGrass(scene) {
+// Canopy mask: 4 cells per unit, so each blade does one lookup instead of a loop over all trees.
+const MASK_RES = 4;
+const MASK_N = SIZE * MASK_RES;
+
+function canopyMask(trees) {
+  const mask = new Uint8Array(MASK_N * MASK_N);
+  for (const t of trees) {
+    const r = t.userData.canopy;
+    const x0 = Math.floor((t.position.x - r + SIZE / 2) * MASK_RES);
+    const x1 = Math.ceil((t.position.x + r + SIZE / 2) * MASK_RES);
+    const z0 = Math.floor((t.position.z - r + SIZE / 2) * MASK_RES);
+    const z1 = Math.ceil((t.position.z + r + SIZE / 2) * MASK_RES);
+    for (let gz = Math.max(z0, 0); gz < Math.min(z1, MASK_N); gz++) {
+      for (let gx = Math.max(x0, 0); gx < Math.min(x1, MASK_N); gx++) {
+        const cx = (gx + 0.5) / MASK_RES - SIZE / 2;
+        const cz = (gz + 0.5) / MASK_RES - SIZE / 2;
+        if (Math.hypot(cx - t.position.x, cz - t.position.z) < r) mask[gz * MASK_N + gx] = 1;
+      }
+    }
+  }
+  return mask;
+}
+
+// Density: thin under tree canopies (shade) and in noisy patches, so it isn't uniform.
+function grassDensity(x, z, mask) {
+  const density = THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
+  const gx = Math.floor((x + SIZE / 2) * MASK_RES);
+  const gz = Math.floor((z + SIZE / 2) * MASK_RES);
+  return mask[gz * MASK_N + gx] ? density * 0.25 : density;
+}
+
+export function buildGrass(scene, trees) {
   const windUniforms = { uWindTime: { value: 0 } };
   const material = new THREE.MeshToonMaterial({ gradientMap: toonGradient(), side: THREE.DoubleSide });
   material.onBeforeCompile = (shader) => {
@@ -40,20 +71,25 @@ export function buildGrass(scene) {
   // Distinct cache key so this program is never shared with plain toon materials.
   material.customProgramCacheKey = () => 'grass-wind';
 
-  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, COUNT);
+  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, ATTEMPTS);
   mesh.receiveShadow = true;
 
   const rand = mulberry32(99);
   const matrix = new THREE.Matrix4();
   const color = new THREE.Color();
-  for (let i = 0; i < COUNT; i++) {
+  const mask = canopyMask(trees);
+  let count = 0;
+  for (let i = 0; i < ATTEMPTS; i++) {
     const x = (rand() * 2 - 1) * HALF;
     const z = (rand() * 2 - 1) * HALF;
+    if (rand() > grassDensity(x, z, mask)) continue;
     const s = 0.7 + rand() * 0.6;
     matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
-    mesh.setMatrixAt(i, matrix);
-    mesh.setColorAt(i, color.setHSL(0.27 + rand() * 0.04, 0.42, 0.4 + rand() * 0.12, THREE.SRGBColorSpace));
+    mesh.setMatrixAt(count, matrix);
+    mesh.setColorAt(count, color.setHSL(0.27 + rand() * 0.04, 0.42, 0.4 + rand() * 0.12, THREE.SRGBColorSpace));
+    count++;
   }
+  mesh.count = count;
 
   scene.add(mesh);
 
