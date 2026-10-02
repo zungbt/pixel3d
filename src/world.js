@@ -22,7 +22,7 @@ function baseHeight(x, z) {
 const POND_X = 3.5;
 const POND_Z = -0.7;
 const POND_R_MAX = 2.6 * 1.22;
-const SAND_R_MAX = POND_R_MAX * 1.2;
+const SAND_R_MAX = POND_R_MAX * 1.1;
 const FLAT_R = SAND_R_MAX + 1.5; // + one grid cell diagonal: every triangle under the sand is flat
 const FLAT_BLEND = 3;
 const SHORE_Y = baseHeight(POND_X, POND_Z);
@@ -40,7 +40,7 @@ function pondRadius(theta) {
 
 // Beach width varies around the pond: wide on some sides, narrow on others.
 function sandRadius(theta) {
-  return pondRadius(theta) * (1.14 + 0.04 * Math.sin(2 * theta + 0.5) + 0.02 * Math.sin(3 * theta + 2));
+  return pondRadius(theta) * (1.07 + 0.02 * Math.sin(2 * theta + 0.5) + 0.01 * Math.sin(3 * theta + 2));
 }
 
 function pondPolar(x, z) {
