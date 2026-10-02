@@ -13,9 +13,37 @@ export function mulberry32(seed) {
   };
 }
 
+function baseHeight(x, z) {
+  return 0.35 * Math.sin(x * 0.6) * Math.cos(z * 0.5) + 0.15 * Math.sin((x + z) * 0.9);
+}
+
+// Pond: an irregular water polygon lying on terrain flattened around it, so the
+// water never intersects sloped triangles (nothing is carved).
+const POND_X = 3.5;
+const POND_Z = -0.7;
+export const SAND_SCALE = 1.18; // sand ring, relative to the shoreline
+const POND_R_MAX = 2.6 * 1.22;
+const FLAT_R = POND_R_MAX * SAND_SCALE + 1.5; // + one grid cell diagonal: every triangle under the sand is flat
+const FLAT_BLEND = 3;
+const SHORE_Y = baseHeight(POND_X, POND_Z);
+const WATER = new THREE.Color(0x4a90c8);
+
+function pondRadius(theta) {
+  return 2.6 * (1 + 0.15 * Math.sin(3 * theta + 1) + 0.07 * Math.sin(5 * theta + 2));
+}
+
+// Distance from the pond centre relative to the shoreline: < 1 water, < SAND_SCALE sand.
+export function pondQ(x, z) {
+  const dx = x - POND_X;
+  const dz = z - POND_Z;
+  return Math.hypot(dx, dz) / pondRadius(Math.atan2(dz, dx));
+}
+
 // Shared by the terrain and by prop placement so nothing floats or sinks.
 export function heightAt(x, z) {
-  return 0.35 * Math.sin(x * 0.6) * Math.cos(z * 0.5) + 0.15 * Math.sin((x + z) * 0.9);
+  const d = Math.hypot(x - POND_X, z - POND_Z);
+  const flat = 1 - THREE.MathUtils.smoothstep(d, FLAT_R, FLAT_R + FLAT_BLEND);
+  return THREE.MathUtils.lerp(baseHeight(x, z), SHORE_Y, flat);
 }
 
 // Smooth 2D value noise in [0, 1], used as density maps for placement.
@@ -108,6 +136,20 @@ function buildTree(rand, gradientMap) {
   return tree;
 }
 
+function buildPondShape(scale, y, color, gradientMap) {
+  const geo = new THREE.CircleGeometry(1, 72);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const r = pondRadius(Math.atan2(pos.getZ(i), pos.getX(i))) * scale;
+    pos.setXYZ(i, pos.getX(i) * r, 0, pos.getZ(i) * r);
+  }
+  const mesh = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color, gradientMap }));
+  mesh.position.set(POND_X, y, POND_Z);
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
 function placeOnGround(obj, x, z) {
   obj.position.set(x, heightAt(x, z), z);
 }
@@ -117,6 +159,9 @@ export function buildWorld(scene) {
   const gradientMap = toonGradient();
 
   scene.add(buildGround(gradientMap));
+  scene.add(buildPondShape(SAND_SCALE, SHORE_Y + 0.01, 0xc9b27c, gradientMap));
+  const water = buildPondShape(1, SHORE_Y + 0.02, WATER, gradientMap);
+  scene.add(water);
 
   const spread = () => (rand() - 0.5) * (SIZE - 3);
   const tooClose = (x, z, minDist) =>
@@ -129,7 +174,7 @@ export function buildWorld(scene) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6)) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || pondQ(x, z) < 1.6) continue;
     const tree = buildTree(rand, gradientMap);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
@@ -151,7 +196,7 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7)) continue;
+      if (tooClose(x, z, 0.7) || pondQ(x, z) < 1) continue;
       const rock = buildRock(rand, r, gradientMap);
       placeOnGround(rock, x, z);
       scene.add(rock);
@@ -161,6 +206,8 @@ export function buildWorld(scene) {
   return {
     trees,
     update(t) {
+      // Water picks up the sky colour (sky.update runs after this, so it lags one frame).
+      water.material.color.copy(WATER).lerp(scene.background, 0.35);
       // Group origin sits on the ground, so the tree pivots at its base.
       for (const tree of trees) {
         const p = tree.userData.phase;
