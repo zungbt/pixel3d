@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { SIZE, fbm, heightAt, mulberry32, pathDist, pathHalfW, sandQ, toonGradient } from './world.js';
+import { SIZE, fbm, heightAt, mulberry32, pathEdge, sandQ } from './world.js';
 
 const ATTEMPTS = 135000; // ~58 blades per square unit before density thinning
 const HALF = SIZE / 2 - 0.1; // just inside the ground
@@ -44,19 +44,21 @@ function canopyMask(trees) {
 }
 
 // Density: thin under tree canopies (shade) and in noisy patches, so it isn't uniform;
-// none on the beach or the path, thickening back over a ragged edge just past them.
-function grassDensity(x, z, mask) {
+// none on the beach, the path or under rocks, thickening back over a ragged edge past the first two.
+function grassDensity(x, z, mask, rocks) {
+  // Exact test, not the mask: a 0.25 cell would still let blades through small stones.
+  if (rocks.some((r) => (r.position.x - x) ** 2 + (r.position.z - z) ** 2 < r.userData.radius ** 2)) return 0;
   const shore = THREE.MathUtils.smoothstep(sandQ(x, z), 1, 1.1);
-  const path = THREE.MathUtils.smoothstep(pathDist(x, z) - pathHalfW(x, z), 0, 0.8);
+  const path = THREE.MathUtils.smoothstep(pathEdge(x, z), 0, 0.8);
   const density = shore * path * THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
   const gx = Math.floor((x + SIZE / 2) * MASK_RES);
   const gz = Math.floor((z + SIZE / 2) * MASK_RES);
   return mask[gz * MASK_N + gx] ? density * 0.25 : density;
 }
 
-export function buildGrass(scene, trees) {
+export function buildGrass(scene, world) {
   const windUniforms = { uWindTime: { value: 0 } };
-  const material = new THREE.MeshToonMaterial({ gradientMap: toonGradient(), side: THREE.DoubleSide });
+  const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap, side: THREE.DoubleSide });
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, windUniforms);
     shader.vertexShader = shader.vertexShader
@@ -85,12 +87,12 @@ export function buildGrass(scene, trees) {
   const rand = mulberry32(99);
   const matrix = new THREE.Matrix4();
   const color = new THREE.Color();
-  const mask = canopyMask(trees);
+  const mask = canopyMask(world.trees);
   let count = 0;
   for (let i = 0; i < ATTEMPTS; i++) {
     const x = (rand() * 2 - 1) * HALF;
     const z = (rand() * 2 - 1) * HALF;
-    if (rand() > grassDensity(x, z, mask)) continue;
+    if (rand() > grassDensity(x, z, mask, world.rocks)) continue;
     const s = 0.7 + rand() * 0.6;
     matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
     mesh.setMatrixAt(count, matrix);

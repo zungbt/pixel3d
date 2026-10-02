@@ -17,7 +17,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
 const world = buildWorld(scene);
-const grass = buildGrass(scene, world.trees);
+const grass = buildGrass(scene, world);
 const sky = buildSky(scene); // last: patches cloud shadows into every toon material above
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);

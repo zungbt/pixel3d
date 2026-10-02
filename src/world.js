@@ -49,10 +49,10 @@ function pondPolar(x, z) {
   return [Math.hypot(dx, dz), Math.atan2(dz, dx)];
 }
 
-// Distance from the pond centre relative to the shoreline: < 1 is water.
-export function pondQ(x, z) {
+// Distance past the shoreline in world units: < 0 is water.
+export function pondEdge(x, z) {
   const [d, theta] = pondPolar(x, z);
-  return d / pondRadius(theta);
+  return d - pondRadius(theta);
 }
 
 // Same, relative to the edge of the beach: < 1 is sand (or water).
@@ -74,15 +74,20 @@ const PATH = { x0: -2.8, amp: 2, freq: 0.22, phase: 1 };
 const PATH_W = { base: 0.55, a1: 0.1, f1: 2.3, a2: 0.06, f2: 5.1 }; // ragged half-width
 const PATH_COLOR = new THREE.Color(0xc3a284);
 
-export function pathHalfW(x, z) {
+function pathHalfW(x, z) {
   return PATH_W.base + PATH_W.a1 * Math.sin(z * PATH_W.f1) + PATH_W.a2 * Math.sin(z * PATH_W.f2 + x);
 }
 
 // Approximate distance to the centreline (horizontal offset scaled by the curve's slope).
-export function pathDist(x, z) {
+function pathDist(x, z) {
   const a = z * PATH.freq + PATH.phase;
   const slope = PATH.amp * PATH.freq * Math.cos(a);
   return Math.abs(x - (PATH.x0 + PATH.amp * Math.sin(a))) / Math.sqrt(1 + slope * slope);
+}
+
+// Distance from the path edge: < 0 is on the path.
+export function pathEdge(x, z) {
+  return pathDist(x, z) - pathHalfW(x, z);
 }
 
 // Smooth 2D value noise in [0, 1], used as density maps for placement.
@@ -112,7 +117,7 @@ function slopeAt(x, z) {
   return Math.hypot(heightAt(x + e, z) - heightAt(x - e, z), heightAt(x, z + e) - heightAt(x, z - e)) / (2 * e);
 }
 
-export function toonGradient() {
+function toonGradient() {
   const tex = new THREE.DataTexture(new Uint8Array([60, 125, 195, 255]), 4, 1, THREE.RedFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
@@ -175,6 +180,7 @@ function buildRock(rand, r, gradientMap) {
   );
   mesh.scale.set(1, 0.6 + rand() * 0.4, 1);
   mesh.rotation.y = rand() * Math.PI;
+  mesh.userData.radius = r;
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
@@ -301,7 +307,7 @@ export function buildWorld(scene) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathDist(x, z) < pathHalfW(x, z) + 1) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathEdge(x, z) < 1) continue;
     const tree = buildTree(rand, gradientMap);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
@@ -310,10 +316,12 @@ export function buildWorld(scene) {
   }
 
   // Rocks: clusters of one boulder plus a few small stones, favouring slopes, never inside a tree.
+  // The centre check uses the largest boulder radius, so every counted cluster keeps its boulder.
+  const rocks = [];
   for (let clusters = 0, attempt = 0; clusters < 12 && attempt < 500; attempt++) {
     const cx = spread();
     const cz = spread();
-    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5)) continue;
+    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || pathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
     clusters++;
     const stones = [[cx, cz, 0.6 + rand() * 0.3]];
     const small = 2 + Math.floor(rand() * 4);
@@ -323,15 +331,18 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondQ(x, z) < 1 || pathDist(x, z) < pathHalfW(x, z) + 0.4) continue;
+      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || pathEdge(x, z) < r + 0.15) continue;
       const rock = buildRock(rand, r, gradientMap);
       placeOnGround(rock, x, z);
+      rocks.push(rock);
       scene.add(rock);
     }
   }
 
   return {
     trees,
+    rocks,
+    gradientMap,
     update(t) {
       // Water picks up a hint of the sky colour (sky.update runs after this, so it lags one frame).
       water.material.color.set(0xffffff).lerp(scene.background, 0.1);
