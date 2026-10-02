@@ -68,6 +68,23 @@ export function heightAt(x, z) {
   return THREE.MathUtils.lerp(baseHeight(x, z), SHORE_Y, flat);
 }
 
+// Dirt path: a meandering centreline x = pathX(z), which runs bottom-left to top-right
+// on screen and passes left of the pond. The same constants feed the JS and GLSL versions.
+const PATH = { x0: -2.8, amp: 2, freq: 0.22, phase: 1 };
+const PATH_W = { base: 0.55, a1: 0.1, f1: 2.3, a2: 0.06, f2: 5.1 }; // ragged half-width
+const PATH_COLOR = new THREE.Color(0xc3a284);
+
+export function pathHalfW(x, z) {
+  return PATH_W.base + PATH_W.a1 * Math.sin(z * PATH_W.f1) + PATH_W.a2 * Math.sin(z * PATH_W.f2 + x);
+}
+
+// Approximate distance to the centreline (horizontal offset scaled by the curve's slope).
+export function pathDist(x, z) {
+  const a = z * PATH.freq + PATH.phase;
+  const slope = PATH.amp * PATH.freq * Math.cos(a);
+  return Math.abs(x - (PATH.x0 + PATH.amp * Math.sin(a))) / Math.sqrt(1 + slope * slope);
+}
+
 // Smooth 2D value noise in [0, 1], used as density maps for placement.
 function hash2(x, z) {
   const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
@@ -122,7 +139,31 @@ function buildGround(gradientMap) {
   geo = geo.toNonIndexed();
   geo.computeVertexNormals();
 
-  const mesh = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0xa4cc86, gradientMap, vertexColors: true }));
+  const material = new THREE.MeshToonMaterial({ color: 0xa4cc86, gradientMap, vertexColors: true });
+  const f = (n) => n.toFixed(4);
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGroundXZ = ( modelMatrix * vec4( transformed, 1.0 ) ).xz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;')
+      .replace('#include <color_fragment>', /* glsl */ `
+        #include <color_fragment>
+        {
+          float x = vGroundXZ.x;
+          float z = vGroundXZ.y;
+          float a = z * ${f(PATH.freq)} + ${f(PATH.phase)};
+          float slope = ${f(PATH.amp * PATH.freq)} * cos( a );
+          float dist = abs( x - ( ${f(PATH.x0)} + ${f(PATH.amp)} * sin( a ) ) ) / sqrt( 1.0 + slope * slope );
+          float halfW = ${f(PATH_W.base)} + ${f(PATH_W.a1)} * sin( z * ${f(PATH_W.f1)} ) + ${f(PATH_W.a2)} * sin( z * ${f(PATH_W.f2)} + x );
+          if ( dist < halfW ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor;
+        }
+      `);
+  };
+  // Distinct cache key: once the cloud patch wraps onBeforeCompile, every toon material's
+  // default key (the hook's source) is identical, and rocks/trees would reuse this program.
+  material.customProgramCacheKey = () => 'ground-path';
+  const mesh = new THREE.Mesh(geo, material);
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -260,7 +301,7 @@ export function buildWorld(scene) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathDist(x, z) < pathHalfW(x, z) + 1) continue;
     const tree = buildTree(rand, gradientMap);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
@@ -282,7 +323,7 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondQ(x, z) < 1) continue;
+      if (tooClose(x, z, 0.7) || pondQ(x, z) < 1 || pathDist(x, z) < pathHalfW(x, z) + 0.4) continue;
       const rock = buildRock(rand, r, gradientMap);
       placeOnGround(rock, x, z);
       scene.add(rock);

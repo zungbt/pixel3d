@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { SIZE, fbm, heightAt, mulberry32, sandQ, toonGradient } from './world.js';
+import { SIZE, fbm, heightAt, mulberry32, pathDist, pathHalfW, sandQ, toonGradient } from './world.js';
 
 const ATTEMPTS = 135000; // ~58 blades per square unit before density thinning
 const HALF = SIZE / 2 - 0.1; // just inside the ground
@@ -44,10 +44,11 @@ function canopyMask(trees) {
 }
 
 // Density: thin under tree canopies (shade) and in noisy patches, so it isn't uniform;
-// none on the beach, thickening back over a ragged edge just past it.
+// none on the beach or the path, thickening back over a ragged edge just past them.
 function grassDensity(x, z, mask) {
   const shore = THREE.MathUtils.smoothstep(sandQ(x, z), 1, 1.1);
-  const density = shore * THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
+  const path = THREE.MathUtils.smoothstep(pathDist(x, z) - pathHalfW(x, z), 0, 0.8);
+  const density = shore * path * THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
   const gx = Math.floor((x + SIZE / 2) * MASK_RES);
   const gz = Math.floor((z + SIZE / 2) * MASK_RES);
   return mask[gz * MASK_N + gx] ? density * 0.25 : density;
