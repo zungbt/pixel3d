@@ -1,5 +1,17 @@
 import * as THREE from 'three';
 
+const DAY_LENGTH = 120; // seconds for a full day-night cycle
+const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
+
+const SUN_DAY = new THREE.Color(0xfff1d6);
+const SUN_LOW = new THREE.Color(0xffa060);
+const MOON = new THREE.Color(0x9fb4ff);
+const SKY_DAY = new THREE.Color(0x7fb2e5);
+const SKY_DUSK = new THREE.Color(0xe0875a);
+const SKY_NIGHT = new THREE.Color(0x0b0d1a);
+const HEMI_DAY = new THREE.Color(0xbfd8ff);
+const HEMI_NIGHT = new THREE.Color(0x2a3a66);
+
 const cloudUniforms = { uCloudTime: { value: 0 } };
 
 const CLOUD_VERTEX = /* glsl */ `
@@ -61,16 +73,18 @@ export function buildSky(scene) {
     if (obj.material?.isMeshToonMaterial) addCloudShadow(obj.material);
   });
 
-  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x3a3326, 1.2));
+  const hemi = new THREE.HemisphereLight(HEMI_DAY, 0x3a3326, 1.2);
+  scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xfff1d6, 2.5);
-  sun.position.set(8, 12, 4);
+  // One directional light: the sun by day, the moon (mirrored across the horizon) by night.
+  const sun = new THREE.DirectionalLight(SUN_DAY, 2.5);
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);
-  sun.shadow.camera.left = -10;
-  sun.shadow.camera.right = 10;
-  sun.shadow.camera.top = 10;
-  sun.shadow.camera.bottom = -10;
+  // ±12 covers the ground's diagonal (~11.3) from any light direction.
+  sun.shadow.camera.left = -12;
+  sun.shadow.camera.right = 12;
+  sun.shadow.camera.top = 12;
+  sun.shadow.camera.bottom = -12;
   sun.shadow.camera.near = 1;
   sun.shadow.camera.far = 40;
   sun.shadow.bias = -0.0005;
@@ -80,6 +94,28 @@ export function buildSky(scene) {
   return {
     update(t) {
       cloudUniforms.uCloudTime.value = t;
+
+      const angle = (t / DAY_LENGTH + DAY_START) * Math.PI * 2;
+      const elevation = Math.sin(angle); // >0 day, <0 night
+      const isDay = elevation >= 0;
+      const dir = isDay ? 1 : -1;
+      sun.position.set(Math.cos(angle) * 14 * dir, Math.abs(elevation) * 14, 5);
+
+      // Light fades to 0 at the horizon, so swapping sun <-> moon there doesn't pop.
+      const fade = THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.2);
+      if (isDay) {
+        sun.color.lerpColors(SUN_LOW, SUN_DAY, THREE.MathUtils.smoothstep(elevation, 0, 0.5));
+        sun.intensity = 2.5 * fade;
+      } else {
+        sun.color.copy(MOON);
+        sun.intensity = 0.6 * fade;
+      }
+
+      const daylight = THREE.MathUtils.smoothstep(elevation, -0.1, 0.25);
+      const dusk = 1 - THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.35);
+      hemi.color.lerpColors(HEMI_NIGHT, HEMI_DAY, daylight);
+      hemi.intensity = THREE.MathUtils.lerp(0.4, 1.2, daylight);
+      scene.background.lerpColors(SKY_NIGHT, SKY_DAY, daylight).lerp(SKY_DUSK, dusk * 0.6);
     },
   };
 }
