@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { NOISE_GLSL } from './world.js';
 
 const DAY_LENGTH = 120; // seconds for a full day-night cycle
 const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
@@ -29,31 +30,20 @@ const CLOUD_VERTEX = /* glsl */ `
 const CLOUD_PARS = /* glsl */ `
   uniform float uCloudTime;
   varying vec3 vCloudPos;
-
-  float cloudHash( vec2 p ) {
-    return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 );
-  }
-
-  float cloudNoise( vec2 p ) {
-    vec2 i = floor( p );
-    vec2 f = fract( p );
-    vec2 u = f * f * ( 3.0 - 2.0 * f );
-    return mix(
-      mix( cloudHash( i ), cloudHash( i + vec2( 1.0, 0.0 ) ), u.x ),
-      mix( cloudHash( i + vec2( 0.0, 1.0 ) ), cloudHash( i + vec2( 1.0, 1.0 ) ), u.x ),
-      u.y
-    );
-  }
+  ${NOISE_GLSL}
 
   float cloudShade( vec3 worldPos ) {
     vec2 p = worldPos.xz * 0.15 + vec2( uCloudTime * 0.05, uCloudTime * 0.02 );
-    float n = cloudNoise( p ) * 0.65 + cloudNoise( p * 2.3 ) * 0.35;
+    float n = valueNoise( p ) * 0.65 + valueNoise( p * 2.3 ) * 0.35;
     return mix( 1.0, 0.35, smoothstep( 0.58, 0.6, n ) );
   }
 `;
 
 function addCloudShadow(material) {
   const previous = material.onBeforeCompile; // keep patches like the grass wind
+  // The wrapper's source is the same for every material, so keep the patched ones apart.
+  const key = material.customProgramCacheKey();
+  material.customProgramCacheKey = () => 'cloud|' + key;
   material.onBeforeCompile = (shader, renderer) => {
     previous.call(material, shader, renderer);
     Object.assign(shader.uniforms, cloudUniforms);
@@ -73,9 +63,12 @@ function addCloudShadow(material) {
 
 // Call after everything that should receive cloud shadows is in the scene.
 export function buildSky(scene) {
+  // Collect first: a material shared by several meshes must be wrapped only once.
+  const materials = new Set();
   scene.traverse((obj) => {
-    if (obj.material?.isMeshToonMaterial) addCloudShadow(obj.material);
+    if (obj.material?.isMeshToonMaterial) materials.add(obj.material);
   });
+  materials.forEach(addCloudShadow);
 
   const hemi = new THREE.HemisphereLight(HEMI_DAY, 0x3a3326, 1.2);
   scene.add(hemi);

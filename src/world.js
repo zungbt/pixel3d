@@ -49,10 +49,10 @@ function pondPolar(x, z) {
   return [Math.hypot(dx, dz), Math.atan2(dz, dx)];
 }
 
-// Distance from the pond centre relative to the shoreline: < 1 is water.
-export function pondQ(x, z) {
+// Distance past the shoreline in world units: < 0 is water.
+export function pondEdge(x, z) {
   const [d, theta] = pondPolar(x, z);
-  return d / pondRadius(theta);
+  return d - pondRadius(theta);
 }
 
 // Same, relative to the edge of the beach: < 1 is sand (or water).
@@ -66,6 +66,28 @@ export function heightAt(x, z) {
   const d = Math.hypot(x - POND_X, z - POND_Z);
   const flat = 1 - THREE.MathUtils.smoothstep(d, FLAT_R, FLAT_R + FLAT_BLEND);
   return THREE.MathUtils.lerp(baseHeight(x, z), SHORE_Y, flat);
+}
+
+// Dirt path: a meandering centreline x = pathX(z), which runs bottom-left to top-right
+// on screen and passes left of the pond. The same constants feed the JS and GLSL versions.
+const PATH = { x0: -2.8, amp: 2, freq: 0.22, phase: 1 };
+const PATH_W = { base: 0.55, a1: 0.1, f1: 2.3, a2: 0.06, f2: 5.1 }; // ragged half-width
+const PATH_COLOR = new THREE.Color(0xc3a284);
+
+function pathHalfW(x, z) {
+  return PATH_W.base + PATH_W.a1 * Math.sin(z * PATH_W.f1) + PATH_W.a2 * Math.sin(z * PATH_W.f2 + x);
+}
+
+// Approximate distance to the centreline (horizontal offset scaled by the curve's slope).
+function pathDist(x, z) {
+  const a = z * PATH.freq + PATH.phase;
+  const slope = PATH.amp * PATH.freq * Math.cos(a);
+  return Math.abs(x - (PATH.x0 + PATH.amp * Math.sin(a))) / Math.sqrt(1 + slope * slope);
+}
+
+// Distance from the path edge: < 0 is on the path.
+export function pathEdge(x, z) {
+  return pathDist(x, z) - pathHalfW(x, z);
 }
 
 // Smooth 2D value noise in [0, 1], used as density maps for placement.
@@ -90,12 +112,34 @@ export function fbm(x, z) {
   return valueNoise(x, z) * 0.65 + valueNoise(x * 2.1 + 17, z * 2.1 + 31) * 0.35;
 }
 
+// GLSL value noise shared by the water and cloud patches. The guard matters: the water
+// shader receives this chunk from both patches.
+export const NOISE_GLSL = /* glsl */ `
+  #ifndef NOISE_GLSL
+  #define NOISE_GLSL
+  float noiseHash( vec2 p ) {
+    return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 );
+  }
+
+  float valueNoise( vec2 p ) {
+    vec2 i = floor( p );
+    vec2 f = fract( p );
+    vec2 u = f * f * ( 3.0 - 2.0 * f );
+    return mix(
+      mix( noiseHash( i ), noiseHash( i + vec2( 1.0, 0.0 ) ), u.x ),
+      mix( noiseHash( i + vec2( 0.0, 1.0 ) ), noiseHash( i + vec2( 1.0, 1.0 ) ), u.x ),
+      u.y
+    );
+  }
+  #endif
+`;
+
 function slopeAt(x, z) {
   const e = 0.1;
   return Math.hypot(heightAt(x + e, z) - heightAt(x - e, z), heightAt(x, z + e) - heightAt(x, z - e)) / (2 * e);
 }
 
-export function toonGradient() {
+function toonGradient() {
   const tex = new THREE.DataTexture(new Uint8Array([60, 125, 195, 255]), 4, 1, THREE.RedFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
@@ -122,39 +166,59 @@ function buildGround(gradientMap) {
   geo = geo.toNonIndexed();
   geo.computeVertexNormals();
 
-  const mesh = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0xa4cc86, gradientMap, vertexColors: true }));
+  const material = new THREE.MeshToonMaterial({ color: 0xa4cc86, gradientMap, vertexColors: true });
+  const f = (n) => n.toFixed(4);
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGroundXZ = ( modelMatrix * vec4( transformed, 1.0 ) ).xz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;')
+      .replace('#include <color_fragment>', /* glsl */ `
+        #include <color_fragment>
+        {
+          float x = vGroundXZ.x;
+          float z = vGroundXZ.y;
+          float a = z * ${f(PATH.freq)} + ${f(PATH.phase)};
+          float slope = ${f(PATH.amp * PATH.freq)} * cos( a );
+          float dist = abs( x - ( ${f(PATH.x0)} + ${f(PATH.amp)} * sin( a ) ) ) / sqrt( 1.0 + slope * slope );
+          float halfW = ${f(PATH_W.base)} + ${f(PATH_W.a1)} * sin( z * ${f(PATH_W.f1)} ) + ${f(PATH_W.a2)} * sin( z * ${f(PATH_W.f2)} + x );
+          if ( dist < halfW ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor.rgb;
+        }
+      `);
+  };
+  const mesh = new THREE.Mesh(geo, material);
   mesh.receiveShadow = true;
   return mesh;
 }
 
-function buildRock(rand, r, gradientMap) {
-  const mesh = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(r, 0),
-    new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
-  );
-  mesh.scale.set(1, 0.6 + rand() * 0.4, 1);
+// Unit-sized geometry shared by every rock and tree; each mesh is sized through its scale.
+const ROCK_GEO = new THREE.DodecahedronGeometry(1, 0);
+const TRUNK_GEO = new THREE.CylinderGeometry(0.12, 0.16, 1, 6);
+const LEAVES_GEO = new THREE.IcosahedronGeometry(1, 0);
+
+function buildRock(rand, r, material) {
+  const mesh = new THREE.Mesh(ROCK_GEO, material);
+  mesh.scale.set(r, r * (0.6 + rand() * 0.4), r);
   mesh.rotation.y = rand() * Math.PI;
+  mesh.userData.radius = r;
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
 }
 
-function buildTree(rand, gradientMap) {
+function buildTree(rand, materials) {
   const tree = new THREE.Group();
   const height = 0.8 + rand() * 0.6;
 
-  const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.16, height, 6),
-    new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
-  );
+  const trunk = new THREE.Mesh(TRUNK_GEO, materials.trunk);
+  trunk.scale.y = height;
   trunk.position.y = height / 2;
 
   const canopy = 0.6 + rand() * 0.3;
   tree.userData.canopy = canopy;
-  const leaves = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(canopy, 0),
-    new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
-  );
+  const leaves = new THREE.Mesh(LEAVES_GEO, materials.leaves);
+  leaves.scale.setScalar(canopy);
   leaves.position.y = height + 0.3;
 
   for (const part of [trunk, leaves]) {
@@ -200,39 +264,27 @@ function waterMaterial(gradientMap) {
         uniform float uWaterTime;
         varying float vEdge;
         varying vec2 vPondXZ;
-        float pondHash( vec2 p ) {
-          return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 );
-        }
-        float pondNoise( vec2 p ) {
-          vec2 i = floor( p );
-          vec2 f = fract( p );
-          vec2 u = f * f * ( 3.0 - 2.0 * f );
-          return mix( mix( pondHash( i ), pondHash( i + vec2( 1.0, 0.0 ) ), u.x ),
-                      mix( pondHash( i + vec2( 0.0, 1.0 ) ), pondHash( i + vec2( 1.0, 1.0 ) ), u.x ), u.y );
-        }`)
+        ${NOISE_GLSL}`)
       .replace('#include <color_fragment>', /* glsl */ `#include <color_fragment>
         {
         float t = uWaterTime;
-        float e = vEdge + ( pondNoise( vPondXZ * 1.3 ) - 0.5 ) * 0.12; // wobbly, not concentric
+        float e = vEdge + ( valueNoise( vPondXZ * 1.3 ) - 0.5 ) * 0.12; // wobbly, not concentric
         vec3 water = e < 0.45 ? ${glslColor(WATER_DEEP)} : e < 0.75 ? ${glslColor(WATER_MID)} : ${glslColor(WATER_SHALLOW)};
         // Far side from the camera (world -x,-z): the inner bank wall shows as a dark band.
         float far = dot( vPondXZ, vec2( -0.7071 ) ) / max( length( vPondXZ ), 1e-4 );
         float bank = smoothstep( 0.2, 1.0, far ) * 0.16;
         bool isBank = vEdge > 1.0 - bank;
-        float foamEdge = 0.95 - pondNoise( vPondXZ * 4.0 + vec2( t * 0.3, 0.0 ) ) * 0.1;
-        bool isFoam = !isBank && ( vEdge > foamEdge || ( vEdge > 0.8 && pondHash( floor( vPondXZ * 12.0 ) ) > 0.97 ) );
+        float foamEdge = 0.95 - valueNoise( vPondXZ * 4.0 + vec2( t * 0.3, 0.0 ) ) * 0.1;
+        bool isFoam = !isBank && ( vEdge > foamEdge || ( vEdge > 0.8 && noiseHash( floor( vPondXZ * 12.0 ) ) > 0.97 ) );
         // Glints: short dashes along the screen horizontal (world x - z), drifting slowly.
         vec2 sp = vec2( ( vPondXZ.x - vPondXZ.y ) * 0.7071 + t * 0.08, ( vPondXZ.x + vPondXZ.y ) * 0.7071 );
-        float h = pondHash( floor( sp * vec2( 4.0, 12.0 ) ) );
+        float h = noiseHash( floor( sp * vec2( 4.0, 12.0 ) ) );
         bool isGlint = vEdge < 0.85 && h > 0.97 && sin( t * 2.0 + h * 60.0 ) > 0.5;
         if ( isBank ) water = ${glslColor(WATER_BANK)};
         if ( isFoam || isGlint ) water = ${glslColor(WATER_FOAM)};
         diffuseColor.rgb *= water;
         }`);
   };
-  // The cloud-shadow wrapper gives every toon material the same onBeforeCompile source,
-  // so without a distinct key this program would be shared with plain toon materials.
-  material.customProgramCacheKey = () => 'pond-water';
   return material;
 }
 
@@ -243,6 +295,11 @@ function placeOnGround(obj, x, z) {
 export function buildWorld(scene) {
   const rand = mulberry32(42);
   const gradientMap = toonGradient();
+  const materials = {
+    trunk: new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
+    leaves: new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
+    rock: new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
+  };
 
   scene.add(buildGround(gradientMap));
   scene.add(buildPondShape(sandRadius, SHORE_Y + 0.01, new THREE.MeshToonMaterial({ color: 0xecd8b8, gradientMap })));
@@ -260,8 +317,8 @@ export function buildWorld(scene) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15) continue;
-    const tree = buildTree(rand, gradientMap);
+    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathEdge(x, z) < 1) continue;
+    const tree = buildTree(rand, materials);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
     trees.push(tree);
@@ -269,10 +326,12 @@ export function buildWorld(scene) {
   }
 
   // Rocks: clusters of one boulder plus a few small stones, favouring slopes, never inside a tree.
+  // The centre check uses the largest boulder radius, so every counted cluster keeps its boulder.
+  const rocks = [];
   for (let clusters = 0, attempt = 0; clusters < 12 && attempt < 500; attempt++) {
     const cx = spread();
     const cz = spread();
-    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5)) continue;
+    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || pathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
     clusters++;
     const stones = [[cx, cz, 0.6 + rand() * 0.3]];
     const small = 2 + Math.floor(rand() * 4);
@@ -282,15 +341,18 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondQ(x, z) < 1) continue;
-      const rock = buildRock(rand, r, gradientMap);
+      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || pathEdge(x, z) < r + 0.15) continue;
+      const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
+      rocks.push(rock);
       scene.add(rock);
     }
   }
 
   return {
     trees,
+    rocks,
+    gradientMap,
     update(t) {
       // Water picks up a hint of the sky colour (sky.update runs after this, so it lags one frame).
       water.material.color.set(0xffffff).lerp(scene.background, 0.1);

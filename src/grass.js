@@ -1,11 +1,34 @@
 import * as THREE from 'three';
-import { SIZE, fbm, heightAt, mulberry32, sandQ, toonGradient } from './world.js';
+import { SIZE, fbm, heightAt, mulberry32, pathEdge, sandQ } from './world.js';
 
 const ATTEMPTS = 135000; // ~58 blades per square unit before density thinning
 const HALF = SIZE / 2 - 0.1; // just inside the ground
 const BLADE_W = 0.1;
 const BLADE_H = 0.3;
 const CAMERA_YAW = Math.PI / 4; // blades face the camera, billboard-style
+
+const windUniforms = { uWindTime: { value: 0 } };
+
+// Travelling gust keyed on the blade's base; only the tip moves. Instanced meshes only
+// (the grass), so it can also patch the pixel pass's normal override for every mesh.
+export function addWind(material) {
+  const previous = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    previous.call(material, shader, renderer);
+    Object.assign(shader.uniforms, windUniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uWindTime;')
+      .replace('#include <begin_vertex>', /* glsl */ `
+        #include <begin_vertex>
+        #ifdef USE_INSTANCING
+          vec2 base = instanceMatrix[3].xz;
+          float sway = sin( uWindTime * 1.6 - ( base.x + base.y ) * 0.45 ) * 0.5 + 0.5;
+          sway = sway * 0.12 + sin( uWindTime * 3.1 + base.x * 2.0 ) * 0.02;
+          transformed.xz += vec2( 0.7071, -0.7071 ) * sway * ( position.y / ${BLADE_H.toFixed(2)} );
+        #endif
+      `);
+  };
+}
 
 function bladeGeometry() {
   const geo = new THREE.BufferGeometry();
@@ -44,59 +67,53 @@ function canopyMask(trees) {
 }
 
 // Density: thin under tree canopies (shade) and in noisy patches, so it isn't uniform;
-// none on the beach, thickening back over a ragged edge just past it.
-function grassDensity(x, z, mask) {
+// none on the beach, the path or under rocks, thickening back over a ragged edge past the first two.
+function grassDensity(x, z, mask, rocks) {
+  // Exact test, not the mask: a 0.25 cell would still let blades through small stones.
+  if (rocks.some((r) => (r.position.x - x) ** 2 + (r.position.z - z) ** 2 < r.userData.radius ** 2)) return 0;
   const shore = THREE.MathUtils.smoothstep(sandQ(x, z), 1, 1.1);
-  const density = shore * THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
+  const path = THREE.MathUtils.smoothstep(pathEdge(x, z), 0, 0.8);
+  const density = shore * path * THREE.MathUtils.lerp(0.15, 1, THREE.MathUtils.smoothstep(fbm(x * 0.15 + 50, z * 0.15), 0.25, 0.5));
   const gx = Math.floor((x + SIZE / 2) * MASK_RES);
   const gz = Math.floor((z + SIZE / 2) * MASK_RES);
   return mask[gz * MASK_N + gx] ? density * 0.25 : density;
 }
 
-export function buildGrass(scene, trees) {
-  const windUniforms = { uWindTime: { value: 0 } };
-  const material = new THREE.MeshToonMaterial({ gradientMap: toonGradient(), side: THREE.DoubleSide });
+export function buildGrass(scene, world) {
+  const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap, side: THREE.DoubleSide });
   material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, windUniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uWindTime;\nvarying float vTip;')
-      .replace('#include <begin_vertex>', /* glsl */ `
-        #include <begin_vertex>
-        // Travelling gust keyed on the blade's base; only the tip moves.
-        vec2 base = instanceMatrix[3].xz;
-        float sway = sin( uWindTime * 1.6 - ( base.x + base.y ) * 0.45 ) * 0.5 + 0.5;
-        sway = sway * 0.12 + sin( uWindTime * 3.1 + base.x * 2.0 ) * 0.02;
-        float tip = position.y / ${BLADE_H.toFixed(2)};
-        transformed.xz += vec2( 0.7071, -0.7071 ) * sway * tip;
-        vTip = tip;
-      `);
+      .replace('#include <common>', '#include <common>\nvarying float vTip;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvTip = position.y / ${BLADE_H.toFixed(2)};`);
     // Darker at the root, lighter at the tip.
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\nvarying float vTip;')
       .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix( 0.85, 1.12, vTip );');
   };
-  // Distinct cache key so this program is never shared with plain toon materials.
-  material.customProgramCacheKey = () => 'grass-wind';
+  addWind(material);
 
-  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, ATTEMPTS);
-  mesh.receiveShadow = true;
-
+  // Place first, then size the instance buffers to the blades actually kept.
   const rand = mulberry32(99);
-  const matrix = new THREE.Matrix4();
-  const color = new THREE.Color();
-  const mask = canopyMask(trees);
-  let count = 0;
+  const mask = canopyMask(world.trees);
+  const placed = [];
   for (let i = 0; i < ATTEMPTS; i++) {
     const x = (rand() * 2 - 1) * HALF;
     const z = (rand() * 2 - 1) * HALF;
-    if (rand() > grassDensity(x, z, mask)) continue;
+    if (rand() > grassDensity(x, z, mask, world.rocks)) continue;
     const s = 0.7 + rand() * 0.6;
-    matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
-    mesh.setMatrixAt(count, matrix);
-    mesh.setColorAt(count, color.setHSL(0.25 + rand() * 0.04, 0.5, 0.71 + rand() * 0.1, THREE.SRGBColorSpace));
-    count++;
+    const h = 0.25 + rand() * 0.04;
+    placed.push([x, z, s, h, 0.71 + rand() * 0.1]);
   }
-  mesh.count = count;
+
+  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, placed.length);
+  mesh.receiveShadow = true;
+  const matrix = new THREE.Matrix4();
+  const color = new THREE.Color();
+  placed.forEach(([x, z, s, h, l], i) => {
+    matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
+    mesh.setMatrixAt(i, matrix);
+    mesh.setColorAt(i, color.setHSL(h, 0.5, l, THREE.SRGBColorSpace));
+  });
 
   scene.add(mesh);
 

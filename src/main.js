@@ -3,7 +3,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelatedPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
-import { buildGrass } from './grass.js';
+import { addWind, buildGrass } from './grass.js';
 import { buildSky } from './sky.js';
 
 const VIEW_HEIGHT = 13; // world units visible vertically
@@ -17,7 +17,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
 const world = buildWorld(scene);
-const grass = buildGrass(scene, world.trees);
+const grass = buildGrass(scene, world);
 const sky = buildSky(scene); // last: patches cloud shadows into every toon material above
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
@@ -42,10 +42,14 @@ function updateFrustum() {
 updateFrustum();
 
 const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
+const pixelPass = new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
   normalEdgeStrength: 0.3,
   depthEdgeStrength: 0.4,
-}));
+});
+// The normal buffer is drawn with this override material (a private field of the pass);
+// without the wind its outlines would sit at the blades' rest positions.
+addWind(pixelPass._normalMaterial);
+composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {
