@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-const SIZE = 16;
+export const SIZE = 48; // large enough to fill a 21:9 screen at VIEW_HEIGHT 13
 
 // Seeded PRNG so the layout is identical on every load.
 export function mulberry32(seed) {
@@ -92,12 +92,12 @@ export function buildWorld(scene) {
 
   const spread = () => (rand() - 0.5) * (SIZE - 3);
   const trees = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 80; i++) {
     const rock = buildRock(rand, gradientMap);
     placeOnGround(rock, spread(), spread());
     scene.add(rock);
   }
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 60; i++) {
     const tree = buildTree(rand, gradientMap);
     placeOnGround(tree, spread(), spread());
     tree.userData.phase = i * 2.4; // not from rand(), so the layout stays unchanged

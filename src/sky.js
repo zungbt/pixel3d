@@ -12,6 +12,8 @@ const SKY_NIGHT = new THREE.Color(0x0b0d1a);
 const HEMI_DAY = new THREE.Color(0xbfd8ff);
 const HEMI_NIGHT = new THREE.Color(0x2a3a66);
 
+const SUN_DIST = 38; // keeps every visible ground point in front of the shadow camera's near plane
+
 const cloudUniforms = { uCloudTime: { value: 0 } };
 
 const CLOUD_VERTEX = /* glsl */ `
@@ -81,14 +83,14 @@ export function buildSky(scene) {
   // One directional light: the sun by day, the moon (mirrored across the horizon) by night.
   const sun = new THREE.DirectionalLight(SUN_DAY, 2.5);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
-  // ±12 covers the ground's diagonal (~11.3) from any light direction.
-  sun.shadow.camera.left = -12;
-  sun.shadow.camera.right = 12;
-  sun.shadow.camera.top = 12;
-  sun.shadow.camera.bottom = -12;
+  sun.shadow.mapSize.set(2048, 2048);
+  // ±22 covers the visible part of the ground (screen corners land ~20 units out on 21:9).
+  sun.shadow.camera.left = -22;
+  sun.shadow.camera.right = 22;
+  sun.shadow.camera.top = 22;
+  sun.shadow.camera.bottom = -22;
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 40;
+  sun.shadow.camera.far = 80;
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
@@ -101,7 +103,7 @@ export function buildSky(scene) {
       const elevation = Math.sin(angle); // >0 day, <0 night
       const isDay = elevation >= 0;
       const dir = isDay ? 1 : -1;
-      sun.position.set(Math.cos(angle) * 14 * dir, Math.abs(elevation) * 14, 5);
+      sun.position.set(Math.cos(angle) * SUN_DIST * dir, Math.abs(elevation) * SUN_DIST, SUN_DIST * 0.36);
 
       // Light fades to 0 at the horizon, so swapping sun <-> moon there doesn't pop.
       const fade = THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.2);

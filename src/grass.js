@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { heightAt, mulberry32, toonGradient } from './world.js';
+import { SIZE, heightAt, mulberry32, toonGradient } from './world.js';
 
-const COUNT = 15000;
-const HALF = 7.9; // just inside the 16×16 ground
+const COUNT = 135000; // ~58 blades per square unit
+const HALF = SIZE / 2 - 0.1; // just inside the ground
 const BLADE_W = 0.1;
 const BLADE_H = 0.3;
 const CAMERA_YAW = Math.PI / 4; // blades face the camera, billboard-style
