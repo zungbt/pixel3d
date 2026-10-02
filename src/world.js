@@ -156,7 +156,7 @@ function buildGround(gradientMap) {
           float slope = ${f(PATH.amp * PATH.freq)} * cos( a );
           float dist = abs( x - ( ${f(PATH.x0)} + ${f(PATH.amp)} * sin( a ) ) ) / sqrt( 1.0 + slope * slope );
           float halfW = ${f(PATH_W.base)} + ${f(PATH_W.a1)} * sin( z * ${f(PATH_W.f1)} ) + ${f(PATH_W.a2)} * sin( z * ${f(PATH_W.f2)} + x );
-          if ( dist < halfW ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor;
+          if ( dist < halfW ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor.rgb;
         }
       `);
   };
