@@ -9,7 +9,7 @@ const MOON = new THREE.Color(0x9fb4ff);
 const SKY_DAY = new THREE.Color(0x7fb2e5);
 const SKY_DUSK = new THREE.Color(0xe0875a);
 const SKY_NIGHT = new THREE.Color(0x0b0d1a);
-const HEMI_DAY = new THREE.Color(0xbfd8ff);
+const HEMI_DAY = new THREE.Color(0xbbe4f4); // faint teal: shadows shift cool-green
 const HEMI_NIGHT = new THREE.Color(0x2a3a66);
 
 const SUN_DIST = 38; // keeps every visible ground point in front of the shadow camera's near plane
@@ -112,13 +112,13 @@ export function buildSky(scene) {
         sun.intensity = 2.5 * fade;
       } else {
         sun.color.copy(MOON);
-        sun.intensity = 0.6 * fade;
+        sun.intensity = 0.3 * fade;
       }
 
       const daylight = THREE.MathUtils.smoothstep(elevation, -0.1, 0.25);
       const dusk = 1 - THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.35);
       hemi.color.lerpColors(HEMI_NIGHT, HEMI_DAY, daylight);
-      hemi.intensity = THREE.MathUtils.lerp(0.4, 1.2, daylight);
+      hemi.intensity = THREE.MathUtils.lerp(0.2, 1.2, daylight);
       scene.background.lerpColors(SKY_NIGHT, SKY_DAY, daylight).lerp(SKY_DUSK, dusk * 0.6);
     },
   };

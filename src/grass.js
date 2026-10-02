@@ -59,7 +59,7 @@ export function buildGrass(scene, trees) {
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, windUniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uWindTime;')
+      .replace('#include <common>', '#include <common>\nuniform float uWindTime;\nvarying float vTip;')
       .replace('#include <begin_vertex>', /* glsl */ `
         #include <begin_vertex>
         // Travelling gust keyed on the blade's base; only the tip moves.
@@ -68,7 +68,12 @@ export function buildGrass(scene, trees) {
         sway = sway * 0.12 + sin( uWindTime * 3.1 + base.x * 2.0 ) * 0.02;
         float tip = position.y / ${BLADE_H.toFixed(2)};
         transformed.xz += vec2( 0.7071, -0.7071 ) * sway * tip;
+        vTip = tip;
       `);
+    // Darker at the root, lighter at the tip.
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vTip;')
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix( 0.85, 1.12, vTip );');
   };
   // Distinct cache key so this program is never shared with plain toon materials.
   material.customProgramCacheKey = () => 'grass-wind';
@@ -88,7 +93,7 @@ export function buildGrass(scene, trees) {
     const s = 0.7 + rand() * 0.6;
     matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
     mesh.setMatrixAt(count, matrix);
-    mesh.setColorAt(count, color.setHSL(0.27 + rand() * 0.04, 0.42, 0.4 + rand() * 0.12, THREE.SRGBColorSpace));
+    mesh.setColorAt(count, color.setHSL(0.25 + rand() * 0.04, 0.5, 0.71 + rand() * 0.1, THREE.SRGBColorSpace));
     count++;
   }
   mesh.count = count;
