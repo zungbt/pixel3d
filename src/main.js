@@ -1,7 +1,11 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelatedPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 
 const VIEW_HEIGHT = 13; // world units visible vertically
+const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
 
 const renderer = new THREE.WebGLRenderer();
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -33,11 +37,19 @@ function updateFrustum() {
 }
 updateFrustum();
 
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
+  normalEdgeStrength: 0.3,
+  depthEdgeStrength: 0.4,
+}));
+composer.addPass(new OutputPass());
+
 window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
   updateFrustum();
 });
 
 renderer.setAnimationLoop(() => {
-  renderer.render(scene, camera);
+  composer.render();
 });
