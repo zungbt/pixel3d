@@ -96,7 +96,7 @@ function slopeAt(x, z) {
 }
 
 export function toonGradient() {
-  const tex = new THREE.DataTexture(new Uint8Array([70, 160, 255]), 3, 1, THREE.RedFormat);
+  const tex = new THREE.DataTexture(new Uint8Array([60, 125, 195, 255]), 4, 1, THREE.RedFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
   tex.generateMipmaps = false;
@@ -111,11 +111,18 @@ function buildGround(gradientMap) {
   for (let i = 0; i < pos.count; i++) {
     pos.setY(i, heightAt(pos.getX(i), pos.getZ(i)));
   }
+  // Soft light/dark patches so bare ground isn't one flat tone.
+  const tint = [];
+  for (let i = 0; i < pos.count; i++) {
+    const k = 0.9 + 0.18 * fbm(pos.getX(i) * 0.2 + 80, pos.getZ(i) * 0.2);
+    tint.push(k, k, k);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(tint, 3));
   // Non-indexed so each face gets its own flat normal (the pixel pass reads geometry normals).
   geo = geo.toNonIndexed();
   geo.computeVertexNormals();
 
-  const mesh = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0x5e9e4a, gradientMap }));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0xa4cc86, gradientMap, vertexColors: true }));
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -123,7 +130,7 @@ function buildGround(gradientMap) {
 function buildRock(rand, r, gradientMap) {
   const mesh = new THREE.Mesh(
     new THREE.DodecahedronGeometry(r, 0),
-    new THREE.MeshToonMaterial({ color: 0x8a8f99, gradientMap }),
+    new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
   );
   mesh.scale.set(1, 0.6 + rand() * 0.4, 1);
   mesh.rotation.y = rand() * Math.PI;
@@ -138,7 +145,7 @@ function buildTree(rand, gradientMap) {
 
   const trunk = new THREE.Mesh(
     new THREE.CylinderGeometry(0.12, 0.16, height, 6),
-    new THREE.MeshToonMaterial({ color: 0x6b4a2f, gradientMap }),
+    new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
   );
   trunk.position.y = height / 2;
 
@@ -146,7 +153,7 @@ function buildTree(rand, gradientMap) {
   tree.userData.canopy = canopy;
   const leaves = new THREE.Mesh(
     new THREE.IcosahedronGeometry(canopy, 0),
-    new THREE.MeshToonMaterial({ color: 0x2f7a3c, gradientMap }),
+    new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
   );
   leaves.position.y = height + 0.3;
 
@@ -238,7 +245,7 @@ export function buildWorld(scene) {
   const gradientMap = toonGradient();
 
   scene.add(buildGround(gradientMap));
-  scene.add(buildPondShape(sandRadius, SHORE_Y + 0.01, new THREE.MeshToonMaterial({ color: 0xe0bf94, gradientMap })));
+  scene.add(buildPondShape(sandRadius, SHORE_Y + 0.01, new THREE.MeshToonMaterial({ color: 0xecd8b8, gradientMap })));
   const water = buildPondShape(pondRadius, SHORE_Y + 0.02, waterMaterial(gradientMap));
   scene.add(water);
 
