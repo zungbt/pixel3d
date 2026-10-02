@@ -112,6 +112,28 @@ export function fbm(x, z) {
   return valueNoise(x, z) * 0.65 + valueNoise(x * 2.1 + 17, z * 2.1 + 31) * 0.35;
 }
 
+// GLSL value noise shared by the water and cloud patches. The guard matters: the water
+// shader receives this chunk from both patches.
+export const NOISE_GLSL = /* glsl */ `
+  #ifndef NOISE_GLSL
+  #define NOISE_GLSL
+  float noiseHash( vec2 p ) {
+    return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 );
+  }
+
+  float valueNoise( vec2 p ) {
+    vec2 i = floor( p );
+    vec2 f = fract( p );
+    vec2 u = f * f * ( 3.0 - 2.0 * f );
+    return mix(
+      mix( noiseHash( i ), noiseHash( i + vec2( 1.0, 0.0 ) ), u.x ),
+      mix( noiseHash( i + vec2( 0.0, 1.0 ) ), noiseHash( i + vec2( 1.0, 1.0 ) ), u.x ),
+      u.y
+    );
+  }
+  #endif
+`;
+
 function slopeAt(x, z) {
   const e = 0.1;
   return Math.hypot(heightAt(x + e, z) - heightAt(x - e, z), heightAt(x, z + e) - heightAt(x, z - e)) / (2 * e);
@@ -165,9 +187,6 @@ function buildGround(gradientMap) {
         }
       `);
   };
-  // Distinct cache key: once the cloud patch wraps onBeforeCompile, every toon material's
-  // default key (the hook's source) is identical, and rocks/trees would reuse this program.
-  material.customProgramCacheKey = () => 'ground-path';
   const mesh = new THREE.Mesh(geo, material);
   mesh.receiveShadow = true;
   return mesh;
@@ -247,39 +266,27 @@ function waterMaterial(gradientMap) {
         uniform float uWaterTime;
         varying float vEdge;
         varying vec2 vPondXZ;
-        float pondHash( vec2 p ) {
-          return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 );
-        }
-        float pondNoise( vec2 p ) {
-          vec2 i = floor( p );
-          vec2 f = fract( p );
-          vec2 u = f * f * ( 3.0 - 2.0 * f );
-          return mix( mix( pondHash( i ), pondHash( i + vec2( 1.0, 0.0 ) ), u.x ),
-                      mix( pondHash( i + vec2( 0.0, 1.0 ) ), pondHash( i + vec2( 1.0, 1.0 ) ), u.x ), u.y );
-        }`)
+        ${NOISE_GLSL}`)
       .replace('#include <color_fragment>', /* glsl */ `#include <color_fragment>
         {
         float t = uWaterTime;
-        float e = vEdge + ( pondNoise( vPondXZ * 1.3 ) - 0.5 ) * 0.12; // wobbly, not concentric
+        float e = vEdge + ( valueNoise( vPondXZ * 1.3 ) - 0.5 ) * 0.12; // wobbly, not concentric
         vec3 water = e < 0.45 ? ${glslColor(WATER_DEEP)} : e < 0.75 ? ${glslColor(WATER_MID)} : ${glslColor(WATER_SHALLOW)};
         // Far side from the camera (world -x,-z): the inner bank wall shows as a dark band.
         float far = dot( vPondXZ, vec2( -0.7071 ) ) / max( length( vPondXZ ), 1e-4 );
         float bank = smoothstep( 0.2, 1.0, far ) * 0.16;
         bool isBank = vEdge > 1.0 - bank;
-        float foamEdge = 0.95 - pondNoise( vPondXZ * 4.0 + vec2( t * 0.3, 0.0 ) ) * 0.1;
-        bool isFoam = !isBank && ( vEdge > foamEdge || ( vEdge > 0.8 && pondHash( floor( vPondXZ * 12.0 ) ) > 0.97 ) );
+        float foamEdge = 0.95 - valueNoise( vPondXZ * 4.0 + vec2( t * 0.3, 0.0 ) ) * 0.1;
+        bool isFoam = !isBank && ( vEdge > foamEdge || ( vEdge > 0.8 && noiseHash( floor( vPondXZ * 12.0 ) ) > 0.97 ) );
         // Glints: short dashes along the screen horizontal (world x - z), drifting slowly.
         vec2 sp = vec2( ( vPondXZ.x - vPondXZ.y ) * 0.7071 + t * 0.08, ( vPondXZ.x + vPondXZ.y ) * 0.7071 );
-        float h = pondHash( floor( sp * vec2( 4.0, 12.0 ) ) );
+        float h = noiseHash( floor( sp * vec2( 4.0, 12.0 ) ) );
         bool isGlint = vEdge < 0.85 && h > 0.97 && sin( t * 2.0 + h * 60.0 ) > 0.5;
         if ( isBank ) water = ${glslColor(WATER_BANK)};
         if ( isFoam || isGlint ) water = ${glslColor(WATER_FOAM)};
         diffuseColor.rgb *= water;
         }`);
   };
-  // The cloud-shadow wrapper gives every toon material the same onBeforeCompile source,
-  // so without a distinct key this program would be shared with plain toon materials.
-  material.customProgramCacheKey = () => 'pond-water';
   return material;
 }
 

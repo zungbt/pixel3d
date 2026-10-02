@@ -3,7 +3,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelatedPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
-import { buildGrass } from './grass.js';
+import { addWind, buildGrass } from './grass.js';
 import { buildSky } from './sky.js';
 
 const VIEW_HEIGHT = 13; // world units visible vertically
@@ -42,10 +42,14 @@ function updateFrustum() {
 updateFrustum();
 
 const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
+const pixelPass = new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
   normalEdgeStrength: 0.3,
   depthEdgeStrength: 0.4,
-}));
+});
+// The normal buffer is drawn with this override material (a private field of the pass);
+// without the wind its outlines would sit at the blades' rest positions.
+addWind(pixelPass._normalMaterial);
+composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {

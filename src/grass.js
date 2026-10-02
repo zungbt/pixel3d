@@ -7,6 +7,29 @@ const BLADE_W = 0.1;
 const BLADE_H = 0.3;
 const CAMERA_YAW = Math.PI / 4; // blades face the camera, billboard-style
 
+const windUniforms = { uWindTime: { value: 0 } };
+
+// Travelling gust keyed on the blade's base; only the tip moves. Instanced meshes only
+// (the grass), so it can also patch the pixel pass's normal override for every mesh.
+export function addWind(material) {
+  const previous = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    previous.call(material, shader, renderer);
+    Object.assign(shader.uniforms, windUniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uWindTime;')
+      .replace('#include <begin_vertex>', /* glsl */ `
+        #include <begin_vertex>
+        #ifdef USE_INSTANCING
+          vec2 base = instanceMatrix[3].xz;
+          float sway = sin( uWindTime * 1.6 - ( base.x + base.y ) * 0.45 ) * 0.5 + 0.5;
+          sway = sway * 0.12 + sin( uWindTime * 3.1 + base.x * 2.0 ) * 0.02;
+          transformed.xz += vec2( 0.7071, -0.7071 ) * sway * ( position.y / ${BLADE_H.toFixed(2)} );
+        #endif
+      `);
+  };
+}
+
 function bladeGeometry() {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute([
@@ -57,29 +80,17 @@ function grassDensity(x, z, mask, rocks) {
 }
 
 export function buildGrass(scene, world) {
-  const windUniforms = { uWindTime: { value: 0 } };
   const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap, side: THREE.DoubleSide });
   material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, windUniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uWindTime;\nvarying float vTip;')
-      .replace('#include <begin_vertex>', /* glsl */ `
-        #include <begin_vertex>
-        // Travelling gust keyed on the blade's base; only the tip moves.
-        vec2 base = instanceMatrix[3].xz;
-        float sway = sin( uWindTime * 1.6 - ( base.x + base.y ) * 0.45 ) * 0.5 + 0.5;
-        sway = sway * 0.12 + sin( uWindTime * 3.1 + base.x * 2.0 ) * 0.02;
-        float tip = position.y / ${BLADE_H.toFixed(2)};
-        transformed.xz += vec2( 0.7071, -0.7071 ) * sway * tip;
-        vTip = tip;
-      `);
+      .replace('#include <common>', '#include <common>\nvarying float vTip;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvTip = position.y / ${BLADE_H.toFixed(2)};`);
     // Darker at the root, lighter at the tip.
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\nvarying float vTip;')
       .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix( 0.85, 1.12, vTip );');
   };
-  // Distinct cache key so this program is never shared with plain toon materials.
-  material.customProgramCacheKey = () => 'grass-wind';
+  addWind(material);
 
   const mesh = new THREE.InstancedMesh(bladeGeometry(), material, ATTEMPTS);
   mesh.receiveShadow = true;
