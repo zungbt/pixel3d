@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelatedPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
+import { buildSky } from './sky.js';
 
 const VIEW_HEIGHT = 13; // world units visible vertically
 const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
@@ -15,6 +16,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
 const world = buildWorld(scene);
+const sky = buildSky(scene);
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 const yaw = Math.PI / 4;
@@ -53,5 +55,6 @@ window.addEventListener('resize', () => {
 renderer.setAnimationLoop((ms) => {
   const t = ms / 1000;
   world.update(t);
+  sky.update(t);
   composer.render();
 });

@@ -105,22 +105,6 @@ export function buildWorld(scene) {
     scene.add(tree);
   }
 
-  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x3a3326, 1.2));
-
-  const sun = new THREE.DirectionalLight(0xfff1d6, 2.5);
-  sun.position.set(8, 12, 4);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
-  sun.shadow.camera.left = -10;
-  sun.shadow.camera.right = 10;
-  sun.shadow.camera.top = 10;
-  sun.shadow.camera.bottom = -10;
-  sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 40;
-  sun.shadow.bias = -0.0005;
-  sun.shadow.normalBias = 0.02;
-  scene.add(sun);
-
   return {
     update(t) {
       // Group origin sits on the ground, so the tree pivots at its base.
