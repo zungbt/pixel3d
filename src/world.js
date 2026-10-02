@@ -192,12 +192,14 @@ function buildGround(gradientMap) {
   return mesh;
 }
 
-function buildRock(rand, r, gradientMap) {
-  const mesh = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(r, 0),
-    new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
-  );
-  mesh.scale.set(1, 0.6 + rand() * 0.4, 1);
+// Unit-sized geometry shared by every rock and tree; each mesh is sized through its scale.
+const ROCK_GEO = new THREE.DodecahedronGeometry(1, 0);
+const TRUNK_GEO = new THREE.CylinderGeometry(0.12, 0.16, 1, 6);
+const LEAVES_GEO = new THREE.IcosahedronGeometry(1, 0);
+
+function buildRock(rand, r, material) {
+  const mesh = new THREE.Mesh(ROCK_GEO, material);
+  mesh.scale.set(r, r * (0.6 + rand() * 0.4), r);
   mesh.rotation.y = rand() * Math.PI;
   mesh.userData.radius = r;
   mesh.castShadow = true;
@@ -205,22 +207,18 @@ function buildRock(rand, r, gradientMap) {
   return mesh;
 }
 
-function buildTree(rand, gradientMap) {
+function buildTree(rand, materials) {
   const tree = new THREE.Group();
   const height = 0.8 + rand() * 0.6;
 
-  const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.16, height, 6),
-    new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
-  );
+  const trunk = new THREE.Mesh(TRUNK_GEO, materials.trunk);
+  trunk.scale.y = height;
   trunk.position.y = height / 2;
 
   const canopy = 0.6 + rand() * 0.3;
   tree.userData.canopy = canopy;
-  const leaves = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(canopy, 0),
-    new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
-  );
+  const leaves = new THREE.Mesh(LEAVES_GEO, materials.leaves);
+  leaves.scale.setScalar(canopy);
   leaves.position.y = height + 0.3;
 
   for (const part of [trunk, leaves]) {
@@ -297,6 +295,11 @@ function placeOnGround(obj, x, z) {
 export function buildWorld(scene) {
   const rand = mulberry32(42);
   const gradientMap = toonGradient();
+  const materials = {
+    trunk: new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
+    leaves: new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
+    rock: new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
+  };
 
   scene.add(buildGround(gradientMap));
   scene.add(buildPondShape(sandRadius, SHORE_Y + 0.01, new THREE.MeshToonMaterial({ color: 0xecd8b8, gradientMap })));
@@ -315,7 +318,7 @@ export function buildWorld(scene) {
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
     if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathEdge(x, z) < 1) continue;
-    const tree = buildTree(rand, gradientMap);
+    const tree = buildTree(rand, materials);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
     trees.push(tree);
@@ -339,7 +342,7 @@ export function buildWorld(scene) {
     }
     for (const [x, z, r] of stones) {
       if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || pathEdge(x, z) < r + 0.15) continue;
-      const rock = buildRock(rand, r, gradientMap);
+      const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
       rocks.push(rock);
       scene.add(rock);

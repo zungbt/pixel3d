@@ -92,25 +92,28 @@ export function buildGrass(scene, world) {
   };
   addWind(material);
 
-  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, ATTEMPTS);
-  mesh.receiveShadow = true;
-
+  // Place first, then size the instance buffers to the blades actually kept.
   const rand = mulberry32(99);
-  const matrix = new THREE.Matrix4();
-  const color = new THREE.Color();
   const mask = canopyMask(world.trees);
-  let count = 0;
+  const placed = [];
   for (let i = 0; i < ATTEMPTS; i++) {
     const x = (rand() * 2 - 1) * HALF;
     const z = (rand() * 2 - 1) * HALF;
     if (rand() > grassDensity(x, z, mask, world.rocks)) continue;
     const s = 0.7 + rand() * 0.6;
-    matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
-    mesh.setMatrixAt(count, matrix);
-    mesh.setColorAt(count, color.setHSL(0.25 + rand() * 0.04, 0.5, 0.71 + rand() * 0.1, THREE.SRGBColorSpace));
-    count++;
+    const h = 0.25 + rand() * 0.04;
+    placed.push([x, z, s, h, 0.71 + rand() * 0.1]);
   }
-  mesh.count = count;
+
+  const mesh = new THREE.InstancedMesh(bladeGeometry(), material, placed.length);
+  mesh.receiveShadow = true;
+  const matrix = new THREE.Matrix4();
+  const color = new THREE.Color();
+  placed.forEach(([x, z, s, h, l], i) => {
+    matrix.makeScale(s, s, s).setPosition(x, heightAt(x, z), z);
+    mesh.setMatrixAt(i, matrix);
+    mesh.setColorAt(i, color.setHSL(h, 0.5, l, THREE.SRGBColorSpace));
+  });
 
   scene.add(mesh);
 
