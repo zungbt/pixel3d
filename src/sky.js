@@ -51,7 +51,9 @@ const CLOUD_PARS = /* glsl */ `
 `;
 
 function addCloudShadow(material) {
-  material.onBeforeCompile = (shader) => {
+  const previous = material.onBeforeCompile; // keep patches like the grass wind
+  material.onBeforeCompile = (shader, renderer) => {
+    previous.call(material, shader, renderer);
     Object.assign(shader.uniforms, cloudUniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vCloudPos;')

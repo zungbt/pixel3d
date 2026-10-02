@@ -3,7 +3,7 @@ import * as THREE from 'three';
 const SIZE = 16;
 
 // Seeded PRNG so the layout is identical on every load.
-function mulberry32(seed) {
+export function mulberry32(seed) {
   return () => {
     seed |= 0;
     seed = (seed + 0x6d2b79f5) | 0;
@@ -18,7 +18,7 @@ export function heightAt(x, z) {
   return 0.35 * Math.sin(x * 0.6) * Math.cos(z * 0.5) + 0.15 * Math.sin((x + z) * 0.9);
 }
 
-function toonGradient() {
+export function toonGradient() {
   const tex = new THREE.DataTexture(new Uint8Array([70, 160, 255]), 3, 1, THREE.RedFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
