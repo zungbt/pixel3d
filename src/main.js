@@ -14,7 +14,7 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
-buildWorld(scene);
+const world = buildWorld(scene);
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 const yaw = Math.PI / 4;
@@ -50,6 +50,8 @@ window.addEventListener('resize', () => {
   updateFrustum();
 });
 
-renderer.setAnimationLoop(() => {
+renderer.setAnimationLoop((ms) => {
+  const t = ms / 1000;
+  world.update(t);
   composer.render();
 });

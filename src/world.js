@@ -91,6 +91,7 @@ export function buildWorld(scene) {
   scene.add(buildGround(gradientMap));
 
   const spread = () => (rand() - 0.5) * (SIZE - 3);
+  const trees = [];
   for (let i = 0; i < 10; i++) {
     const rock = buildRock(rand, gradientMap);
     placeOnGround(rock, spread(), spread());
@@ -99,6 +100,8 @@ export function buildWorld(scene) {
   for (let i = 0; i < 8; i++) {
     const tree = buildTree(rand, gradientMap);
     placeOnGround(tree, spread(), spread());
+    tree.userData.phase = i * 2.4; // not from rand(), so the layout stays unchanged
+    trees.push(tree);
     scene.add(tree);
   }
 
@@ -117,4 +120,15 @@ export function buildWorld(scene) {
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
+
+  return {
+    update(t) {
+      // Group origin sits on the ground, so the tree pivots at its base.
+      for (const tree of trees) {
+        const p = tree.userData.phase;
+        tree.rotation.z = 0.035 * Math.sin(t * 1.3 + p);
+        tree.rotation.x = 0.02 * Math.sin(t * 0.9 + p * 1.7);
+      }
+    },
+  };
 }
