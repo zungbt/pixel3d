@@ -11,7 +11,7 @@ import { createFrameLimiter, parseFps } from './frame-limiter.js';
 import { createBench } from './bench.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
-const PIXEL_SIZE = 3; // device px per art pixel
+const PIXEL_SIZE = 2; // device px per art pixel
 // Every pass renders at art resolution; the canvas is stretched to the window with
 // image-rendering: pixelated (index.html), so composite and output run once per art pixel.
 // Sized in device pixels, so browser zoom and display scaling keep every art pixel the same
