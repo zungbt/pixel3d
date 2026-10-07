@@ -329,7 +329,6 @@ export function buildWorld(scene) {
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
     trees.push(tree);
-    scene.add(tree);
   }
 
   // Rocks: clusters of one boulder plus a few small stones, favouring slopes, never inside a tree.
@@ -352,9 +351,25 @@ export function buildWorld(scene) {
       const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
       rocks.push(rock);
-      scene.add(rock);
     }
   }
+
+  // Trees and rocks stay plain objects (insects, flowers and grass read their positions) but are
+  // drawn as three instanced meshes: one draw call per pass each instead of ~300 in all.
+  const instanced = (geo, material, parts) => {
+    const mesh = new THREE.InstancedMesh(geo, material, parts.length);
+    parts.forEach((part, i) => {
+      part.updateWorldMatrix(true, false);
+      mesh.setMatrixAt(i, part.matrixWorld);
+    });
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+    return mesh;
+  };
+  const trunks = instanced(TRUNK_GEO, materials.trunk, trees.map((t) => t.children[0]));
+  const crowns = instanced(LEAVES_GEO, materials.leaves, trees.map((t) => t.children[1]));
+  instanced(ROCK_GEO, materials.rock, rocks);
 
   return {
     trees,
@@ -365,11 +380,16 @@ export function buildWorld(scene) {
       water.material.color.set(0xffffff).lerp(scene.background, 0.1);
       waterUniforms.uWaterTime.value = t;
       // Group origin sits on the ground, so the tree pivots at its base.
-      for (const tree of trees) {
+      trees.forEach((tree, i) => {
         const p = tree.userData.phase;
         tree.rotation.z = 0.035 * Math.sin(t * 1.3 + p);
         tree.rotation.x = 0.02 * Math.sin(t * 0.9 + p * 1.7);
-      }
+        tree.updateMatrixWorld();
+        trunks.setMatrixAt(i, tree.children[0].matrixWorld);
+        crowns.setMatrixAt(i, tree.children[1].matrixWorld);
+      });
+      trunks.instanceMatrix.needsUpdate = true;
+      crowns.instanceMatrix.needsUpdate = true;
     },
   };
 }

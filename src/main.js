@@ -8,13 +8,20 @@ import { buildSky, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
 import { createFrameLimiter, parseFps } from './frame-limiter.js';
+import { createBench } from './bench.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
-const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
+const PIXEL_SIZE = 4; // CSS px per art pixel
+// Every pass renders at art resolution; the canvas is stretched to the window with
+// image-rendering: pixelated (index.html), so composite and output run once per art pixel.
+const artSize = () => [Math.floor(window.innerWidth / PIXEL_SIZE), Math.floor(window.innerHeight / PIXEL_SIZE)];
 
 const renderer = new THREE.WebGLRenderer();
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(...artSize(), false);
 renderer.shadowMap.enabled = true;
+// Every renderer.render of the lit scene would redraw the shadow map, the pixel pass's normal
+// render included; the loop flags it once per frame so only the colour render draws it.
+renderer.shadowMap.autoUpdate = false;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -47,7 +54,7 @@ function updateFrustum() {
 updateFrustum();
 
 const composer = new EffectComposer(renderer);
-const pixelPass = new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
+const pixelPass = new RenderPixelatedPass(1, scene, camera, {
   normalEdgeStrength: 0.3,
   depthEdgeStrength: 0.4,
 });
@@ -58,8 +65,8 @@ composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  composer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(...artSize(), false);
+  composer.setSize(...artSize());
   updateFrustum();
 });
 
@@ -88,18 +95,34 @@ fpsSelect.addEventListener('change', () => {
 });
 const shouldRender = createFrameLimiter();
 
+const bench = new URLSearchParams(location.search).has('bench')
+  ? createBench(renderer, (hour) => {
+      timeInput.value = hour;
+      timeInput.dispatchEvent(new Event('input'));
+    })
+  : null;
+
 let lastT;
 renderer.setAnimationLoop((ms) => {
   if (!shouldRender(ms, parseFps(fpsSelect.value))) return; // skipped ticks don't advance lastT, so dt spans the gap
   const t = ms / 1000;
   const dt = lastT === undefined ? 0 : Math.min(t - lastT, 0.1); // no jumps after a hidden tab
   lastT = t;
+  bench?.begin();
   world.update(t);
+  bench?.mark('world');
   grass.update(t);
+  bench?.mark('grass');
   sky.update(t + skyOffset);
+  bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
+  bench?.mark('insects');
   const hour = (sky.state.phase * 24 + 6) % 24;
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
+  bench?.mark('hud');
+  renderer.shadowMap.needsUpdate = true;
   composer.render();
+  bench?.mark('render');
+  bench?.end();
 });
