@@ -45,10 +45,12 @@ export function buildClock(scene, world) {
   dial.position.set(0, POST_H, 0.071);
   const parts = [post, rim, dial];
 
-  // Ticks at 12, 3, 6 and 9: more would blur together at this size.
-  for (let i = 0; i < 4; i++) {
-    const a = (i * Math.PI) / 2;
-    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.12, 0.02), ink);
+  // A tick per hour; 12, 3, 6 and 9 are bigger.
+  const bigTick = new THREE.BoxGeometry(0.07, 0.12, 0.02);
+  const smallTick = new THREE.BoxGeometry(0.045, 0.07, 0.02);
+  for (let i = 0; i < 12; i++) {
+    const a = (i * Math.PI) / 6;
+    const tick = new THREE.Mesh(i % 3 ? smallTick : bigTick, ink);
     tick.position.set(Math.sin(a) * (R - 0.1), POST_H + Math.cos(a) * (R - 0.1), 0.08);
     tick.rotation.z = -a;
     parts.push(tick);
