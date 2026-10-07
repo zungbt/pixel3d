@@ -28,6 +28,8 @@ renderer.shadowMap.enabled = true;
 // render included; the loop flags it once per frame so only the colour render draws it.
 renderer.shadowMap.autoUpdate = false;
 document.body.appendChild(renderer.domElement);
+// The grass frees its CPU-side instance data after upload, so a lost context can't be restored.
+renderer.domElement.addEventListener('webglcontextlost', () => location.reload());
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
