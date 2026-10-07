@@ -4,10 +4,32 @@ import { NOISE_GLSL } from './world.js';
 export const DAY_LENGTH = 300; // seconds for a full day-night cycle
 const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
 
-// The sky time that shows this local clock time (sunrise 06:00, sunset 18:00).
-export function clockTime(date = new Date()) {
+// Clock hour <-> sky phase, for a day with sunrise and sunset at sun.rise and sun.set (sunTimes):
+// the day maps onto phase 0 -> 0.5 and the night onto 0.5 -> 1, each at an even pace.
+export function hourToPhase(hour, { rise, set }) {
+  const day = (set - rise + 24) % 24;
+  const since = (((hour - rise) % 24) + 24) % 24;
+  return since < day ? (0.5 * since) / day : 0.5 + (0.5 * (since - day)) / (24 - day);
+}
+
+export function phaseToHour(phase, { rise, set }) {
+  const day = (set - rise + 24) % 24;
+  const hour = phase < 0.5 ? rise + 2 * phase * day : set + 2 * (phase - 0.5) * (24 - day);
+  return ((hour % 24) + 24) % 24;
+}
+
+// The sky time that shows this local clock time.
+export function clockTime(date, sun) {
   const hour = date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600;
-  return (((((hour - 6) / 24 - DAY_START) % 1) + 1) % 1) * DAY_LENGTH;
+  return ((((hourToPhase(hour, sun) - DAY_START) % 1) + 1) % 1) * DAY_LENGTH;
+}
+
+// Ground fog: 'auto' rolls in at dusk and burns off after sunrise, thicker in winter
+// (winterness, 0-1); 'always' is full fog day and night.
+export function fogAmount(mode, elevation, winter) {
+  if (mode === 'always') return 1;
+  if (mode !== 'auto') return 0;
+  return (1 - THREE.MathUtils.smoothstep(elevation, -0.05, 0.2)) * THREE.MathUtils.lerp(0.35, 1, winter);
 }
 
 const SUN_DAY = new THREE.Color(0xfff1d6);
@@ -18,10 +40,12 @@ const SKY_DUSK = new THREE.Color(0xe0875a);
 const SKY_NIGHT = new THREE.Color(0x0b0d1a);
 const HEMI_DAY = new THREE.Color(0xbbe4f4); // faint teal: shadows shift cool-green
 const HEMI_NIGHT = new THREE.Color(0x2a3a66);
+const FOG_DAY = new THREE.Color(0xdfe6ea);
+const FOG_NIGHT = new THREE.Color(0x323c58);
 
 const SUN_DIST = 38; // keeps every visible ground point in front of the shadow camera's near plane
 
-const cloudUniforms = { uCloudTime: { value: 0 } };
+const cloudUniforms = { uCloudTime: { value: 0 }, uFogAmount: { value: 0 }, uFogColor: { value: new THREE.Color() } };
 
 const CLOUD_VERTEX = /* glsl */ `
   #include <worldpos_vertex>
@@ -45,6 +69,19 @@ const CLOUD_PARS = /* glsl */ `
   }
 `;
 
+// Low fog by absolute height, thinning upward: hollows and the pond fill first, the clock face
+// and the crowns get a light haze; drifting patches.
+const FOG_PARS = /* glsl */ `
+  uniform float uFogAmount;
+  uniform vec3 uFogColor;
+  float groundFog( vec3 worldPos ) {
+    float layer = exp( -0.5 * max( worldPos.y, 0.0 ) );
+    vec2 p = worldPos.xz * 0.18 + vec2( uCloudTime * 0.04, uCloudTime * 0.015 );
+    float n = valueNoise( p + 40.0 ) * 0.65 + valueNoise( p * 2.3 + 7.0 ) * 0.35;
+    return uFogAmount * layer * mix( 0.45, 1.0, n ) * 0.5;
+  }
+`;
+
 function addCloudShadow(material) {
   const previous = material.onBeforeCompile; // keep patches like the grass wind
   // The wrapper's source is the same for every material, so keep the patched ones apart.
@@ -56,14 +93,20 @@ function addCloudShadow(material) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vCloudPos;')
       .replace('#include <worldpos_vertex>', CLOUD_VERTEX);
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <lights_toon_pars_fragment>',
-      CLOUD_PARS +
-        THREE.ShaderChunk.lights_toon_pars_fragment.replace(
-          '* directLight.color;',
-          '* directLight.color * cloudShade( vCloudPos );',
-        ),
-    );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <lights_toon_pars_fragment>',
+        CLOUD_PARS +
+          FOG_PARS +
+          THREE.ShaderChunk.lights_toon_pars_fragment.replace(
+            '* directLight.color;',
+            '* directLight.color * cloudShade( vCloudPos );',
+          ),
+      )
+      .replace(
+        '#include <fog_fragment>',
+        '#include <fog_fragment>\ngl_FragColor.rgb = mix( gl_FragColor.rgb, uFogColor, groundFog( vCloudPos ) );',
+      );
   };
 }
 
@@ -94,13 +137,13 @@ export function buildSky(scene) {
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
 
-  // Read by the insects each frame; phase 0 -> 0.5 is day, 0.5 is sunset.
-  const state = { phase: 0, elevation: 0, daylight: 0 };
+  // Read by the insects and the clock each frame; phase 0 -> 0.5 is day, 0.5 is sunset.
+  const state = { phase: 0, elevation: 0, daylight: 0, fog: 0, fogColor: cloudUniforms.uFogColor.value };
 
   return {
     state,
     // dayT sets the time of day; t alone drives the clouds, so they keep drifting when dayT is the clock.
-    update(t, dayT = t) {
+    update(t, dayT = t, fog = { mode: 'off', winter: 0 }) {
       cloudUniforms.uCloudTime.value = t;
 
       state.phase = (dayT / DAY_LENGTH + DAY_START) % 1;
@@ -117,16 +160,24 @@ export function buildSky(scene) {
         sun.intensity = 2.5 * fade;
       } else {
         sun.color.copy(MOON);
-        sun.intensity = 0.3 * fade;
+        sun.intensity = 0.12 * fade; // faint, so moon shadows stay soft
       }
 
       const daylight = THREE.MathUtils.smoothstep(elevation, -0.1, 0.25);
       state.elevation = elevation;
       state.daylight = daylight;
       const dusk = 1 - THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.35);
-      hemi.color.lerpColors(HEMI_NIGHT, HEMI_DAY, daylight);
-      hemi.intensity = THREE.MathUtils.lerp(0.2, 1.2, daylight);
+      // The ambient brightens from an hour before sunrise (and dims until an hour after sunset):
+      // while the moon fades out and the sun fades in there's no direct light, and with the
+      // night ambient that left twilight darker than midnight.
+      const twilight = THREE.MathUtils.smoothstep(elevation, -0.25, 0.25);
+      hemi.color.lerpColors(HEMI_NIGHT, HEMI_DAY, twilight);
+      // The night ambient's blue is dim, hence the high intensity: with the faint moon it keeps
+      // moon shadows at ~60% of the lit ground instead of near black.
+      hemi.intensity = THREE.MathUtils.lerp(2.1, 1.2, twilight);
       scene.background.lerpColors(SKY_NIGHT, SKY_DAY, daylight).lerp(SKY_DUSK, dusk * 0.6);
+      state.fog = cloudUniforms.uFogAmount.value = fogAmount(fog.mode, elevation, fog.winter);
+      cloudUniforms.uFogColor.value.lerpColors(FOG_NIGHT, FOG_DAY, daylight).lerp(SKY_DUSK, dusk * 0.3);
     },
   };
 }

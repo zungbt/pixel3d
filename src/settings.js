@@ -9,6 +9,7 @@ const PARSE = {
   fps: (v) => (v === '' ? null : (parseFps(v) ?? 15)), // '' is Native (null: no cap); unset means 15
   clock: (v) => v === 'true', // the sky follows the local clock instead of the slider
   hideHud: (v) => v === 'true',
+  fog: (v) => (['off', 'auto', 'always'].includes(v) ? v : 'auto'), // ground fog, see fogAmount
   showClock: (v) => v !== 'false', // the post clock beside the path
 };
 
