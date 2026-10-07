@@ -70,9 +70,7 @@ export function buildGnats(scene, ctx) {
     }
   });
 
-  // Transparent-free, unlit specks, darkened in update as the light fades. Being instanced they
-  // also get the grass wind in the pixel pass's normal render; for a box this small the offset is
-  // ~0.01 units, well under an art pixel, so it is left alone.
+  // Transparent-free, unlit specks, darkened in update as the light fades.
   const mesh = new THREE.InstancedMesh(
     new THREE.BoxGeometry(SIZE, SIZE, SIZE),
     new THREE.MeshBasicMaterial(),

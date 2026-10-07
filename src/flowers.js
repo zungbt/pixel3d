@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { SIZE, fbm, heightAt, mulberry32 } from './world.js';
-import { addWind, canopyMask, grassDensity, underCanopy } from './grass.js';
+import { addWind, canopyMask, windAttribute, grassDensity, underCanopy } from './grass.js';
 
 const ATTEMPTS = 24000; // ~1800 flowers, ~9 patches in view
 const HALF = SIZE / 2 - 0.1;
@@ -24,6 +24,7 @@ export function buildFlowers(scene, world) {
 
   const geo = new THREE.OctahedronGeometry(HEAD_R, 0);
   geo.translate(0, HEAD_Y, 0);
+  windAttribute(geo);
   const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap });
   addWind(material);
 

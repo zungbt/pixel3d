@@ -59,8 +59,10 @@ const pixelPass = new RenderPixelatedPass(1, scene, camera, {
   depthEdgeStrength: 0.4,
 });
 // The normal buffer is drawn with this override material (a private field of the pass);
-// without the wind its outlines would sit at the blades' rest positions.
+// without the wind its outlines would sit at the blades' rest positions. Meshes without the
+// aWind attribute (trees, rocks, insects) read this default and stay still.
 addWind(pixelPass._normalMaterial);
+pixelPass._normalMaterial.defaultAttributeValues = { aWind: [0] };
 composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
