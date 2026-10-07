@@ -11,6 +11,8 @@ const WING_L = 0.1;
 const ACCEL = 3;
 const FOLDED = Math.PI / 2 - 0.08; // wings closed together over the back
 const NEAR = 3; // usual hop to the next flower
+const FAR = 8; // the longer hop, to another patch
+const CROWD = 1.5; // a flower this close to another butterfly, or to where it's headed, is taken
 
 // A flat wing hinged on the body axis (local z), extending to one side.
 function wingGeometry(side) {
@@ -61,9 +63,22 @@ export function buildButterflies(scene, ctx) {
   }
 
   const randomHead = (rand) => heads[Math.floor(rand() * heads.length)];
-  function headNear(p, maxDist, rand) {
-    const near = heads.filter((h) => Math.hypot(h.x - p.x, h.z - p.z) < maxDist);
-    return near.length ? near[Math.floor(rand() * near.length)] : randomHead(rand);
+  // A random flower within maxDist of b (then FAR, then anywhere), skipping crowded ones
+  // unless every flower is.
+  function headNear(b, maxDist) {
+    const crowded = (h) =>
+      flies.some((o) => {
+        if (o === b) return false;
+        const at = o.perch?.isObject3D ? o.perch.position : o.perch;
+        return Math.hypot(h.x - o.pos.x, h.z - o.pos.z) < CROWD || (at && Math.hypot(h.x - at.x, h.z - at.z) < CROWD);
+      });
+    const free = heads.filter((h) => !crowded(h));
+    const pool = free.length ? free : heads;
+    for (const r of [maxDist, FAR]) {
+      const near = pool.filter((h) => Math.hypot(h.x - b.pos.x, h.z - b.pos.z) < r);
+      if (near.length) return near[Math.floor(b.rand() * near.length)];
+    }
+    return pool[Math.floor(b.rand() * pool.length)];
   }
   function nearestHead(p) {
     let best = heads[0];
@@ -87,9 +102,9 @@ export function buildButterflies(scene, ctx) {
 
   function nextAfterFeeding(b) {
     const warmRocks = rocks.filter((rock) => rock.position.distanceTo(b.pos) < 5);
-    const next = pick(b.rand, { bask: warmRocks.length ? b.bask : 0, near: 0.73, far: 0.15 });
+    const next = pick(b.rand, { bask: warmRocks.length ? b.bask : 0, near: 0.58, far: 0.3 });
     if (next === 'bask') flyTo(b, 'toBask', warmRocks[Math.floor(b.rand() * warmRocks.length)]);
-    else flyTo(b, 'fly', headNear(b.pos, next === 'near' ? NEAR : 8, b.rand));
+    else flyTo(b, 'fly', headNear(b, next === 'near' ? NEAR : FAR));
   }
 
   const _aim = new THREE.Vector3();
@@ -128,11 +143,11 @@ export function buildButterflies(scene, ctx) {
           b.perch = randomHead(b.rand);
           b.pos.copy(perchPoint(b.perch, t));
           if (dark) b.state = 'roost';
-          else flyTo(b, 'fly', headNear(b.pos, NEAR, b.rand));
+          else flyTo(b, 'fly', headNear(b, NEAR));
         }
 
         if (b.state === 'roost') {
-          if (sky.daylight > b.threshold + 0.05) flyTo(b, 'fly', headNear(b.pos, NEAR, b.rand));
+          if (sky.daylight > b.threshold + 0.05) flyTo(b, 'fly', headNear(b, NEAR));
         } else if (dark && b.state !== 'toRoost') {
           flyTo(b, 'toRoost', nearestHead(b.pos));
         }
@@ -140,7 +155,7 @@ export function buildButterflies(scene, ctx) {
         const flying = b.state === 'fly' || b.state === 'toBask' || b.state === 'toRoost';
         if (flying) {
           if (fly(b, t, dt)) land(b);
-          else if (b.timer <= 0) flyTo(b, b.state === 'toRoost' ? 'toRoost' : 'fly', headNear(b.pos, 8, b.rand));
+          else if (b.timer <= 0) flyTo(b, b.state === 'toRoost' ? 'toRoost' : 'fly', headNear(b, FAR));
         } else {
           b.pos.copy(perchPoint(b.perch, t));
           if (b.state !== 'roost' && (b.timer -= dt) <= 0) nextAfterFeeding(b);
