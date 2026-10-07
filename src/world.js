@@ -19,9 +19,9 @@ function baseHeight(x, z) {
 
 // Pond: an irregular water polygon inside a wide sand beach, both lying on terrain
 // flattened around them, so neither ever intersects sloped triangles (nothing is carved).
-const POND_X = 3.5;
-const POND_Z = -0.7;
-const POND_R_MAX = 2.6 * 1.22;
+const POND_X = 6.2;
+const POND_Z = -2.3;
+const POND_R_MAX = 3.7 * 1.22;
 const SAND_R_MAX = POND_R_MAX * 1.1;
 const FLAT_R = SAND_R_MAX + 1.5; // + one grid cell diagonal: every triangle under the sand is flat
 const FLAT_BLEND = 3;
@@ -35,7 +35,7 @@ const WATER_FOAM = new THREE.Color(0xeef6ff);
 const waterUniforms = { uWaterTime: { value: 0 } };
 
 function pondRadius(theta) {
-  return 2.6 * (1 + 0.15 * Math.sin(3 * theta + 1) + 0.07 * Math.sin(5 * theta + 2));
+  return 3.7 * (1 + 0.15 * Math.sin(3 * theta + 1) + 0.07 * Math.sin(5 * theta + 2));
 }
 
 // Beach width varies around the pond: wide on some sides, narrow on others.
