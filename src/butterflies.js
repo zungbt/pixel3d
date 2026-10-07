@@ -12,7 +12,7 @@ const ACCEL = 3;
 const FOLDED = Math.PI / 2 - 0.08; // wings closed together over the back
 const NEAR = 3; // usual hop to the next flower
 const FAR = 8; // the longer hop, to another patch
-const CROWD = 1.5; // a flower this close to another butterfly, or to where it's headed, is taken
+const CROWD = 2.5; // a flower this close to another butterfly, or to where it's headed, is taken
 
 // A flat wing hinged on the body axis (local z), extending to one side.
 function wingGeometry(side) {
