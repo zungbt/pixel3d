@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { heightAt } from './world.js';
 import { buildButterflies } from './butterflies.js';
 import { buildDragonflies } from './dragonflies.js';
+import { buildFireflies } from './fireflies.js';
+import { buildGnats } from './gnats.js';
 
 const ROAM_R = 13; // the part of the map that is on screen
 
@@ -64,9 +66,17 @@ function flightHelpers(world) {
 
 // Every insect species; built before the sky so their toon materials get cloud shadows.
 export function buildInsects(scene, world, flowers) {
-  const ctx = { world, flowers, ...flightHelpers(world) };
-  const species = [buildButterflies(scene, ctx), buildDragonflies(scene, ctx)];
+  // swarms (gnats) and hunters (dragonflies) are filled by those species and only read in update,
+  // so build order doesn't matter.
+  const ctx = { world, flowers, swarms: [], hunters: [], ...flightHelpers(world) };
+  const species = [
+    buildButterflies(scene, ctx),
+    buildDragonflies(scene, ctx),
+    buildFireflies(scene, ctx),
+    buildGnats(scene, ctx),
+  ];
   return {
+    ctx, // read by the tests
     update(t, dt, sky) {
       for (const s of species) s.update(t, dt, sky);
     },
