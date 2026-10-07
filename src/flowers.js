@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import { SIZE, fbm, heightAt, mulberry32 } from './world.js';
 import { addWind, canopyMask, grassDensity, underCanopy } from './grass.js';
 
-const ATTEMPTS = 40000; // ~2500 flowers, ~13 dense patches in view
+const ATTEMPTS = 24000; // ~1800 flowers, ~9 patches in view
 const HALF = SIZE / 2 - 0.1;
-const HEAD_Y = 0.28; // just above the grass tips; also sets how far the wind sways the head
+export const HEAD_Y = 0.36; // over most grass tips (blades reach 0.39) so they don't flicker across it; also scales the sway
+export const HEAD_R = 0.1; // ~3 art pixels
 const COLORS = [0xf4f1e8, 0xf2d35b, 0xa98be0, 0xee9fc0].map((c) => new THREE.Color(c));
 
 // Wildflower patches in open meadow: same exclusions as the grass, plus none under canopies.
@@ -16,12 +17,12 @@ export function buildFlowers(scene, world) {
   for (let i = 0; i < ATTEMPTS; i++) {
     const x = (rand() * 2 - 1) * HALF;
     const z = (rand() * 2 - 1) * HALF;
-    const patch = THREE.MathUtils.smoothstep(fbm(x * 0.5 + 200, z * 0.5), 0.7, 0.74);
+    const patch = THREE.MathUtils.smoothstep(fbm(x * 0.3 + 200, z * 0.3), 0.7, 0.74);
     if (rand() > patch * grassDensity(x, z, mask, world.rocks) || underCanopy(mask, x, z)) continue;
     heads.push({ x, z, y: heightAt(x, z) + HEAD_Y });
   }
 
-  const geo = new THREE.OctahedronGeometry(0.05, 0);
+  const geo = new THREE.OctahedronGeometry(HEAD_R, 0);
   geo.translate(0, HEAD_Y, 0);
   const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap });
   addWind(material);
