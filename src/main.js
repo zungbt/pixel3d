@@ -7,6 +7,7 @@ import { addWind, buildGrass } from './grass.js';
 import { buildSky, clockTime, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
+import { buildClock } from './clock.js';
 import { createFrameLimiter } from './frame-limiter.js';
 import { createBench } from './bench.js';
 import { loadSettings, parseSetting, saveSetting } from './settings.js';
@@ -44,6 +45,7 @@ const world = buildWorld(scene);
 const grass = buildGrass(scene, world);
 const flowers = buildFlowers(scene, world);
 const insects = buildInsects(scene, world, flowers);
+const clock = buildClock(scene, world);
 const sky = buildSky(scene); // last: patches cloud shadows into every toon material above
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
@@ -105,9 +107,11 @@ form.pixelSize.value = settings.pixelSize;
 form.fps.value = settings.fps ?? '';
 form.clock.value = settings.clock;
 form.hideHud.checked = settings.hideHud;
+form.showClock.checked = settings.showClock;
 function applyHud() {
   hud.classList.toggle('bare', settings.hideHud);
   timeInput.disabled = settings.clock; // the slider still shows the clock's time
+  clock.object.visible = settings.showClock;
 }
 applyHud();
 document.querySelector('#gear').addEventListener('click', () => (form.hidden = !form.hidden));
@@ -147,6 +151,7 @@ renderer.setAnimationLoop((ms) => {
   bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');
+  clock.update(new Date(), sky.state.daylight);
   const hour = (sky.state.phase * 24 + 6) % 24;
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;

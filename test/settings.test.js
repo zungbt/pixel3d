@@ -7,7 +7,7 @@ function memoryStorage(entries = {}) {
   return { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
 }
 
-const DEFAULTS = { pixelSize: 2, fps: 15, clock: false, hideHud: false };
+const DEFAULTS = { pixelSize: 2, fps: 15, clock: false, hideHud: false, showClock: true };
 
 test('empty storage gives the defaults', () => assert.deepEqual(loadSettings(memoryStorage()), DEFAULTS));
 
@@ -25,13 +25,14 @@ test('unexpected stored values fall back', () => {
     'pixel3d.fps': '45',
     'pixel3d.clock': 'yes',
     'pixel3d.hideHud': '1',
+    'pixel3d.showClock': '0',
   });
   assert.deepEqual(loadSettings(storage), DEFAULTS);
 });
 
 test('saved values load back', () => {
   const storage = memoryStorage();
-  const settings = { pixelSize: 4, fps: 30, clock: true, hideHud: true };
+  const settings = { pixelSize: 4, fps: 30, clock: true, hideHud: true, showClock: false };
   for (const [name, value] of Object.entries(settings)) saveSetting(name, value, storage);
   assert.deepEqual(loadSettings(storage), settings);
 });
