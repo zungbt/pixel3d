@@ -1,7 +1,7 @@
 # pixel3d
 
 A pixel-art 3D scene built with [three.js](https://threejs.org/) + [Vite]: windswept grass, wildflowers, butterflies, dragonflies, fireflies and gnats, a pond, a dirt path, trees, rocks, clouds and a day–night cycle, rendered through `RenderPixelatedPass`.
-![Uploading {22A11981-9B3F-497C-9929-5BA05F5919CD}.png…]()
+
 
 ## Running
 
