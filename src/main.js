@@ -16,6 +16,9 @@ const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
 const renderer = new THREE.WebGLRenderer();
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
+// Every renderer.render of the lit scene would redraw the shadow map, the pixel pass's normal
+// render included; the loop flags it once per frame so only the colour render draws it.
+renderer.shadowMap.autoUpdate = false;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -115,6 +118,7 @@ renderer.setAnimationLoop((ms) => {
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
   bench?.mark('hud');
+  renderer.shadowMap.needsUpdate = true;
   composer.render();
   bench?.mark('render');
   bench?.end();
