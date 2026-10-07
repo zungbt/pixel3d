@@ -69,9 +69,7 @@ export function buildFireflies(scene, ctx) {
   const females = flies.filter((f) => !f.male);
 
   // Transparent with no depth write: drawn after every opaque mesh but still hidden behind
-  // trees and grass, and never darkened by the pixel pass's depth edges. Being instanced, it
-  // also gets the grass wind in the pixel pass's normal render; for a box this small the
-  // offset is ~0.01 units, well under an art pixel, so it is left alone.
+  // trees and grass, and never darkened by the pixel pass's depth edges.
   const mesh = new THREE.InstancedMesh(
     new THREE.BoxGeometry(SIZE, SIZE, SIZE),
     new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }),
