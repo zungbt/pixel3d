@@ -7,18 +7,25 @@ import { addWind, buildGrass } from './grass.js';
 import { buildSky, clockTime, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
-import { createFrameLimiter, parseFps } from './frame-limiter.js';
+import { createFrameLimiter } from './frame-limiter.js';
 import { createBench } from './bench.js';
+import { loadSettings, parseSetting, saveSetting } from './settings.js';
+
+// Wallpaper mode (?wallpaper): no HUD, the sky follows the local clock, and 30 fps, for this
+// page only: the saved settings are left alone.
+const params = new URLSearchParams(location.search);
+const wallpaper = params.has('wallpaper');
+const settings = loadSettings();
+if (wallpaper) Object.assign(settings, { fps: 30, clock: true, hideHud: true });
 
 const VIEW_HEIGHT = 18; // world units visible vertically
-const PIXEL_SIZE = 2; // device px per art pixel
 // Every pass renders at art resolution; the canvas is stretched to the window with
 // image-rendering: pixelated (index.html), so composite and output run once per art pixel.
 // Sized in device pixels, so browser zoom and display scaling keep every art pixel the same
 // whole number of screen pixels instead of an uneven 4-or-5.
 const artSize = () => [
-  Math.floor((window.innerWidth * devicePixelRatio) / PIXEL_SIZE),
-  Math.floor((window.innerHeight * devicePixelRatio) / PIXEL_SIZE),
+  Math.floor((window.innerWidth * devicePixelRatio) / settings.pixelSize),
+  Math.floor((window.innerHeight * devicePixelRatio) / settings.pixelSize),
 ];
 
 const renderer = new THREE.WebGLRenderer();
@@ -74,11 +81,12 @@ pixelPass._normalMaterial.defaultAttributeValues = { aWind: [0] };
 composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
-window.addEventListener('resize', () => {
+function resize() {
   renderer.setSize(...artSize(), false);
   composer.setSize(...artSize());
   updateFrustum();
-});
+}
+window.addEventListener('resize', resize);
 
 // Time-of-day slider, 0-24 h (sunrise 06:00, sunset 18:00). It moves only the sky's clock;
 // wind, water and wings keep real time. Always jumps forward, so the sky's time never goes negative.
@@ -90,29 +98,32 @@ timeInput.addEventListener('input', () => {
   skyOffset += ((((phase - sky.state.phase) % 1) + 1) % 1) * DAY_LENGTH;
 });
 
-// Frame-rate cap, remembered between visits; an unknown stored value means no cap.
-// Storage access throws when the browser blocks it: then the cap just isn't remembered.
-const fpsSelect = document.querySelector('#fps');
-let storedFps = null;
-try {
-  storedFps = localStorage.getItem('pixel3d.fps');
-} catch {}
-fpsSelect.value = String(parseFps(storedFps) ?? '');
-fpsSelect.addEventListener('change', () => {
-  try {
-    localStorage.setItem('pixel3d.fps', fpsSelect.value);
-  } catch {}
-});
-const shouldRender = createFrameLimiter();
-
-// Wallpaper mode (?wallpaper): no HUD, the sky follows the local clock, and 30 fps (the stored
-// cap is left alone).
-const params = new URLSearchParams(location.search);
-const wallpaper = params.has('wallpaper');
-if (wallpaper) {
-  document.querySelector('#hud').style.display = 'none';
-  fpsSelect.value = '30';
+// Settings panel behind the gear button; every change applies at once and is remembered.
+const hud = document.querySelector('#hud');
+const form = document.querySelector('#settings');
+form.pixelSize.value = settings.pixelSize;
+form.fps.value = settings.fps ?? '';
+form.clock.value = settings.clock;
+form.hideHud.checked = settings.hideHud;
+function applyHud() {
+  hud.classList.toggle('bare', settings.hideHud);
+  timeInput.disabled = settings.clock; // the slider still shows the clock's time
 }
+applyHud();
+document.querySelector('#gear').addEventListener('click', () => (form.hidden = !form.hidden));
+form.addEventListener('change', ({ target }) => {
+  const value = parseSetting(target.name, target.type === 'checkbox' ? String(target.checked) : target.value);
+  // Back to the slider: carry on from the clock's time of day, jumping forward as the slider does.
+  if (target.name === 'clock' && !value) {
+    skyOffset += (((clockTime() - (lastT ?? 0) - skyOffset) % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH;
+  }
+  settings[target.name] = value;
+  saveSetting(target.name, value);
+  if (target.name === 'pixelSize') resize();
+  applyHud();
+});
+if (wallpaper) hud.style.display = 'none';
+const shouldRender = createFrameLimiter();
 
 const bench = params.has('bench')
   ? createBench(renderer, (hour) => {
@@ -123,7 +134,7 @@ const bench = params.has('bench')
 
 let lastT;
 renderer.setAnimationLoop((ms) => {
-  if (!shouldRender(ms, parseFps(fpsSelect.value))) return; // skipped ticks don't advance lastT, so dt spans the gap
+  if (!shouldRender(ms, settings.fps)) return; // skipped ticks don't advance lastT, so dt spans the gap
   const t = ms / 1000;
   const dt = lastT === undefined ? 0 : Math.min(t - lastT, 0.1); // no jumps after a hidden tab
   lastT = t;
@@ -132,8 +143,7 @@ renderer.setAnimationLoop((ms) => {
   bench?.mark('world');
   grass.update(t);
   bench?.mark('grass');
-  if (wallpaper) sky.update(t, clockTime());
-  else sky.update(t + skyOffset);
+  sky.update(t + skyOffset, settings.clock ? clockTime() : t + skyOffset);
   bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');

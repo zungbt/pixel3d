@@ -12,19 +12,45 @@
         font: 14px monospace; color: #fff; text-shadow: 0 1px 2px #000;
       }
       #time { display: flex; align-items: center; gap: 8px; }
-      #fps { font: inherit; color: inherit; text-shadow: inherit; background: none; border: 1px solid #fff8; }
-      #fps option { color: #000; text-shadow: none; } /* the dropdown list keeps its light background */
+      #hud select, #gear { font: inherit; color: inherit; text-shadow: inherit; background: none; border: 1px solid #fff8; }
+      #hud option { color: #000; text-shadow: none; } /* the dropdown list keeps its light background */
+      #gear { cursor: pointer; padding: 0 6px; font-size: 16px; }
+      #settings input { justify-self: start; margin: 0; }
+      #settings {
+        position: absolute; left: 0; bottom: calc(100% + 8px); display: grid; grid-template-columns: auto auto;
+        gap: 6px 12px; align-items: center; padding: 8px 10px; background: #0008; border: 1px solid #fff8;
+      }
+      #settings[hidden] { display: none; }
+      #hud.bare #time { display: none; }
+      #hud.bare #gear:not(:hover) { opacity: 0.3; }
     </style>
   </head>
   <body>
     <div id="hud">
+      <button id="gear" title="Settings">⚙</button>
       <label id="time"><input type="range" min="0" max="24" step="0.01" /><span></span></label>
-      <select id="fps" title="Frame-rate cap">
-        <option value="">Native</option>
-        <option value="60">60 fps</option>
-        <option value="30">30 fps</option>
-        <option value="20">20 fps</option>
-      </select>
+      <form id="settings" hidden>
+        Pixel size
+        <select name="pixelSize">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+        FPS cap
+        <select name="fps">
+          <option value="">Native</option>
+          <option value="60">60 fps</option>
+          <option value="30">30 fps</option>
+          <option value="20">20 fps</option>
+        </select>
+        Time
+        <select name="clock">
+          <option value="false">Manual</option>
+          <option value="true">Clock</option>
+        </select>
+        Hide HUD
+        <input type="checkbox" name="hideHud" />
+      </form>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>
