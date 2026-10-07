@@ -8,7 +8,7 @@ for (const fps of [60, 10]) {
   test(`butterflies turn at most 6 rad/s and stay sane for a day at ${fps} fps`, () => {
     const s = buildScene();
     const flies = s.scene.children.filter((c) => c.name === 'butterfly');
-    assert.equal(flies.length, 8);
+    assert.equal(flies.length, 12);
     const prev = flies.map((f) => f.rotation.y);
     let maxRate = 0;
     let nan = 0;

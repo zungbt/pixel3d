@@ -4,7 +4,7 @@ import { pick, rngFor, turn } from './motion.js';
 import { windSway } from './grass.js';
 import { HEAD_R, HEAD_Y } from './flowers.js';
 
-const COUNT = 8;
+const COUNT = 12;
 const COLORS = [0xf3f0e6, 0xf0d860, 0xe8964a, 0x8fb4ee]; // cabbage white, brimstone, orange tip, blue
 const WING_W = 0.12; // one wing: half the ~0.25 wingspan, so ~4 art pixels across
 const WING_L = 0.1;
