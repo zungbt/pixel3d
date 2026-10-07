@@ -4,8 +4,8 @@ import * as THREE from 'three';
 import { buildScene, simulate } from './scene.js';
 import { pondEdge } from '../src/world.js';
 
-const IN_SWARMS = 50; // instances before the loners
-const LONERS = 8;
+const IN_SWARMS = 38; // instances before the loners
+const LONERS = 20;
 const m = new THREE.Matrix4();
 const p = new THREE.Vector3();
 
