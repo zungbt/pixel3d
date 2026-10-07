@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { heightAt, mulberry32, pathEdge, pondEdge, pondPoint } from './world.js';
 
-const MALES = 40;
+const MALES = 28;
 const FEMALES = 10;
-const LONERS = 8; // males that drift across the meadow on their own, away from the swarms
+const LONERS = 20; // males that drift across the meadow on their own, away from the swarms
 const SIZE = 0.075; // about one art pixel
 const SPEED = 0.15;
 const FLASH = 1; // seconds lit, fading in and out
@@ -11,9 +11,10 @@ const PERIOD = 5.5; // seconds between a male's flashes
 const ANSWER_DELAY = 2;
 const ANSWER_DIST = 2;
 const GLOW = new THREE.Color(0xd8ff6a);
-const CLUSTERS = 4;
-const CLUSTER_R = 2; // half-width of the square each swarm keeps to
+const CLUSTERS = 6;
+const CLUSTER_R = 3; // half-width of the square each swarm keeps to
 const LONER_STEP = 3; // half-width of the square a loner picks its next spot in, around where it is
+const LONER_GAP = 4; // loners start at least this far apart, so they cover the meadow
 
 // Dusk to midnight, in a few loose swarms: males drift low around their swarm, each giving a short rising ("J") flash
 // every few seconds; females wait on grass tips and answer a nearby male about 2 s later,
@@ -52,8 +53,13 @@ export function buildFireflies(scene, ctx) {
     const loner = i >= MALES + FEMALES;
     const home = loner ? null : centres[i % centres.length];
     const pos = new THREE.Vector3();
-    if (loner) while (!openSpot(pos, 0, 0, 11));
-    else if (!openSpot(pos, home.x, home.z, CLUSTER_R)) pos.copy(home);
+    if (loner) {
+      // Spaced out from the other loners if there's room; after 100 tries, any open spot.
+      for (let k = 0; k < 100; k++) {
+        while (!openSpot(pos, 0, 0, 11));
+        if (!flies.some((o) => !o.home && o.pos.distanceTo(pos) < LONER_GAP)) break;
+      }
+    } else if (!openSpot(pos, home.x, home.z, CLUSTER_R)) pos.copy(home);
     flies.push({
       male: i < MALES || loner,
       home,
