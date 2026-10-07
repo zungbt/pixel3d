@@ -74,9 +74,18 @@ timeInput.addEventListener('input', () => {
 });
 
 // Frame-rate cap, remembered between visits; an unknown stored value means no cap.
+// Storage access throws when the browser blocks it: then the cap just isn't remembered.
 const fpsSelect = document.querySelector('#fps');
-fpsSelect.value = String(parseFps(localStorage.getItem('pixel3d.fps')) ?? '');
-fpsSelect.addEventListener('change', () => localStorage.setItem('pixel3d.fps', fpsSelect.value));
+let storedFps = null;
+try {
+  storedFps = localStorage.getItem('pixel3d.fps');
+} catch {}
+fpsSelect.value = String(parseFps(storedFps) ?? '');
+fpsSelect.addEventListener('change', () => {
+  try {
+    localStorage.setItem('pixel3d.fps', fpsSelect.value);
+  } catch {}
+});
 const shouldRender = createFrameLimiter();
 
 let lastT;
