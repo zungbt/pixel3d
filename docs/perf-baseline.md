@@ -21,6 +21,19 @@ The iGPU is shared with the Windows desktop, so runs vary a lot. One run in thre
 |---|---|---|---|---|---|---|---|---|---|
 | 95b11cd | original | ~946 | 5.9–8.3 | 1.4–1.8 | 2.3–2.6 | 1.2–1.8 | 0.8–0.95 | 4.1–4.8 | 3.6–4.1 |
 | 26f3afc | instanced trees and rocks | 94 | 5.6–6.5 (one run 9.4) | 1.3–1.5 | 1.7–2.4 | 1.2–1.6 | 0.75–0.83 | 1.7–3.1 | 0.9–1.9 |
+| 7573afe | shadow map once per frame | 91 | 5.3–8.9 | 1.4–2.8 | 1.35–2.4 | 1.3–3.2 | 0.77–1.08 | 1.8–2.7 | 1.0–1.7 |
+| step 3 | whole pipeline at art resolution | 91 | 3.0–4.9 | 1.27–2.05 | 1.37–1.94 | 0.13–0.22 | 0.05–0.09 | 1.7–2.2 | 0.9–1.2 |
+
+From step 3 on, the drawing buffer is the art resolution (480×270 at 1080p), and the canvas is stretched to the window with `image-rendering: pixelated`. The bench's `canvas` field reports the drawing buffer, and `css` reports the window size.
+
+At 960×540 (`W=960 H=540`), 7573afe compared with step 3:
+
+| commit | gpu p50 | p2 | p3 |
+|---|---|---|---|
+| 7573afe | 3.85–5.0 | 0.33–0.63 | 0.12–0.23 |
+| step 3 | 4.0–6.1 | 0.07–0.13 | 0.04–0.08 |
+
+At 540p, p0 and p1 come out the same as at 1080p, or worse in noisy runs. They don't scale with art resolution, so they are bound by vertices and the fixed-size shadow map, not by fill rate. That is why the total gain shows up at large windows.
 
 What the original numbers show:
 - **Grass:** in a one-off A/B run, hiding the grass saved about 0.8 ms in p0 and about 0.5 ms in p1.

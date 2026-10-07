@@ -11,10 +11,13 @@ import { createFrameLimiter, parseFps } from './frame-limiter.js';
 import { createBench } from './bench.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
-const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
+const PIXEL_SIZE = 4; // CSS px per art pixel
+// Every pass renders at art resolution; the canvas is stretched to the window with
+// image-rendering: pixelated (index.html), so composite and output run once per art pixel.
+const artSize = () => [Math.floor(window.innerWidth / PIXEL_SIZE), Math.floor(window.innerHeight / PIXEL_SIZE)];
 
 const renderer = new THREE.WebGLRenderer();
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(...artSize(), false);
 renderer.shadowMap.enabled = true;
 // Every renderer.render of the lit scene would redraw the shadow map, the pixel pass's normal
 // render included; the loop flags it once per frame so only the colour render draws it.
@@ -51,7 +54,7 @@ function updateFrustum() {
 updateFrustum();
 
 const composer = new EffectComposer(renderer);
-const pixelPass = new RenderPixelatedPass(PIXEL_SIZE, scene, camera, {
+const pixelPass = new RenderPixelatedPass(1, scene, camera, {
   normalEdgeStrength: 0.3,
   depthEdgeStrength: 0.4,
 });
@@ -62,8 +65,8 @@ composer.addPass(pixelPass);
 composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  composer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(...artSize(), false);
+  composer.setSize(...artSize());
   updateFrustum();
 });
 
