@@ -4,7 +4,8 @@ import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelated
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
-import { buildSky, clockTime, DAY_LENGTH } from './sky.js';
+import { buildSky, clockTime, DAY_LENGTH, hourToPhase, phaseToHour } from './sky.js';
+import { sunTimes, viewerPlace, winterness } from './sun.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
 import { buildClock } from './clock.js';
@@ -90,13 +91,18 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 
-// Time-of-day slider, 0-24 h (sunrise 06:00, sunset 18:00). It moves only the sky's clock;
+// Today's sunrise and sunset where the viewer's time zone says they are; refreshed every frame,
+// so a page left open follows the date.
+const place = viewerPlace();
+let sun = sunTimes(new Date(), place);
+
+// Time-of-day slider, 0-24 h (sunrise and sunset from `sun`). It moves only the sky's clock;
 // wind, water and wings keep real time. Always jumps forward, so the sky's time never goes negative.
 const timeInput = document.querySelector('#time input');
 const timeLabel = document.querySelector('#time span');
 let skyOffset = 0;
 timeInput.addEventListener('input', () => {
-  const phase = (timeInput.valueAsNumber - 6) / 24;
+  const phase = hourToPhase(timeInput.valueAsNumber, sun);
   skyOffset += ((((phase - sky.state.phase) % 1) + 1) % 1) * DAY_LENGTH;
 });
 
@@ -107,6 +113,7 @@ form.pixelSize.value = settings.pixelSize;
 form.fps.value = settings.fps ?? '';
 form.clock.value = settings.clock;
 form.hideHud.checked = settings.hideHud;
+form.fog.value = settings.fog;
 form.showClock.checked = settings.showClock;
 function applyHud() {
   hud.classList.toggle('bare', settings.hideHud);
@@ -119,7 +126,7 @@ form.addEventListener('change', ({ target }) => {
   const value = parseSetting(target.name, target.type === 'checkbox' ? String(target.checked) : target.value);
   // Back to the slider: carry on from the clock's time of day, jumping forward as the slider does.
   if (target.name === 'clock' && !value) {
-    skyOffset += (((clockTime() - (lastT ?? 0) - skyOffset) % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH;
+    skyOffset += (((clockTime(new Date(), sun) - (lastT ?? 0) - skyOffset) % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH;
   }
   settings[target.name] = value;
   saveSetting(target.name, value);
@@ -147,12 +154,17 @@ renderer.setAnimationLoop((ms) => {
   bench?.mark('world');
   grass.update(t);
   bench?.mark('grass');
-  sky.update(t + skyOffset, settings.clock ? clockTime() : t + skyOffset);
+  const now = new Date();
+  sun = sunTimes(now, place);
+  sky.update(t + skyOffset, settings.clock ? clockTime(now, sun) : t + skyOffset, {
+    mode: settings.fog,
+    winter: winterness(now, place[0]),
+  });
   bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');
-  clock.update(new Date(), sky.state.daylight);
-  const hour = (sky.state.phase * 24 + 6) % 24;
+  clock.update(now, sky.state.daylight);
+  const hour = phaseToHour(sky.state.phase, sun);
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
   bench?.mark('hud');
