@@ -6,7 +6,7 @@ import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
 import { buildSky } from './sky.js';
 
-const VIEW_HEIGHT = 13; // world units visible vertically
+const VIEW_HEIGHT = 18; // world units visible vertically
 const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
 
 const renderer = new THREE.WebGLRenderer();
