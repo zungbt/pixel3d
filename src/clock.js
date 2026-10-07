@@ -5,7 +5,8 @@ import { heightAt } from './world.js';
 const X = -3.25;
 const Z = -2.75; // open grass left of the path, no tree within 2.8 units
 const POST_H = 1.6;
-const R = 0.5; // face radius: ~30 art pixels across at pixel size 2 on 1080p
+const R = 0.5; // face radius before SCALE
+const SCALE = 1.3; // face ~40 art pixels across at pixel size 2 on 1080p
 
 // Hand angles in radians, clockwise from 12.
 export function handAngles(date) {
@@ -35,6 +36,7 @@ export function buildClock(scene, world) {
   const clock = new THREE.Group();
   clock.position.set(X, heightAt(X, Z), Z);
   clock.rotation.y = Math.PI / 4; // face (+z) toward the camera
+  clock.scale.setScalar(SCALE);
 
   const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, POST_H, 6), iron);
   post.position.y = POST_H / 2;
