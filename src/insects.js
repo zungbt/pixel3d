@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { heightAt } from './world.js';
 import { buildButterflies } from './butterflies.js';
 import { buildDragonflies } from './dragonflies.js';
+import { buildFireflies } from './fireflies.js';
 
 const ROAM_R = 13; // the part of the map that is on screen
 
@@ -65,7 +66,7 @@ function flightHelpers(world) {
 // Every insect species; built before the sky so their toon materials get cloud shadows.
 export function buildInsects(scene, world, flowers) {
   const ctx = { world, flowers, ...flightHelpers(world) };
-  const species = [buildButterflies(scene, ctx), buildDragonflies(scene, ctx)];
+  const species = [buildButterflies(scene, ctx), buildDragonflies(scene, ctx), buildFireflies(scene, ctx)];
   return {
     update(t, dt, sky) {
       for (const s of species) s.update(t, dt, sky);
