@@ -41,5 +41,6 @@ test('parseFps: only the offered caps, anything else is native (null)', () => {
   assert.equal(parseFps('60'), 60);
   assert.equal(parseFps('30'), 30);
   assert.equal(parseFps('20'), 20);
+  assert.equal(parseFps('15'), 15);
   for (const bad of ['', null, undefined, 'abc', '45', '0', '-30']) assert.equal(parseFps(bad), null, String(bad));
 });

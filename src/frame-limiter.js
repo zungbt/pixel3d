@@ -1,6 +1,6 @@
 // Frame-rate cap: decides which animation-loop ticks get drawn. A lower cap halves (or more)
 // the pixel pass's work, which suits a pixel-art scene that doesn't need 144 Hz.
-export const FPS_CAPS = [60, 30, 20];
+export const FPS_CAPS = [60, 30, 20, 15];
 
 const EARLY = 1; // ms: tick timestamps jitter, so a frame this early still counts as on time
 const STALL = 250; // ms: a gap this long (hidden tab, hitch) restarts the schedule
