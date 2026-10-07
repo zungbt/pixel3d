@@ -3,6 +3,7 @@ import { SIZE, fbm, heightAt, mulberry32, pathEdge, sandQ } from './world.js';
 
 const ATTEMPTS = 135000; // ~58 blades per square unit before density thinning
 const HALF = SIZE / 2 - 0.1; // just inside the ground
+const VIEW_MARGIN = 0.6; // world units kept past the screen edges: blade height, width and sway
 const BLADE_W = 0.1;
 export const BLADE_H = 0.3;
 const CAMERA_YAW = Math.PI / 4; // blades face the camera, billboard-style
@@ -132,9 +133,41 @@ export function buildGrass(scene, world) {
 
   scene.add(mesh);
 
+  // The camera never moves and the view is always the same height, so the first call drops the
+  // blades above and below the screen and sorts the rest by distance from the centre line; after
+  // that a resize only changes how many of them are drawn.
+  let edges; // |view-space x| of the kept blades, ascending
   return {
     update(t) {
       windUniforms.uWindTime.value = t;
+    },
+    fitView(camera) {
+      if (!edges) {
+        camera.updateMatrixWorld();
+        const p = new THREE.Vector3();
+        const kept = [];
+        for (let i = 0; i < placed.length; i++) {
+          p.fromArray(mesh.instanceMatrix.array, i * 16 + 12).applyMatrix4(camera.matrixWorldInverse);
+          if (Math.abs(p.y) < camera.top + VIEW_MARGIN) kept.push([Math.abs(p.x), i]);
+        }
+        kept.sort((a, b) => a[0] - b[0]);
+        const matrices = mesh.instanceMatrix.array.slice();
+        const colors = mesh.instanceColor.array.slice();
+        kept.forEach(([, i], j) => {
+          mesh.instanceMatrix.array.set(matrices.subarray(i * 16, i * 16 + 16), j * 16);
+          mesh.instanceColor.array.set(colors.subarray(i * 3, i * 3 + 3), j * 3);
+        });
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        edges = kept.map(([x]) => x);
+      }
+      let n = 0; // first blade past the side edges
+      for (let hi = edges.length; n < hi; ) {
+        const mid = (n + hi) >> 1;
+        if (edges[mid] < camera.right + VIEW_MARGIN) n = mid + 1;
+        else hi = mid;
+      }
+      mesh.count = n;
     },
   };
 }
