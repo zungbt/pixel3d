@@ -7,7 +7,7 @@ function memoryStorage(entries = {}) {
   return { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
 }
 
-const DEFAULTS = { pixelSize: 2, fps: null, clock: false, hideHud: false };
+const DEFAULTS = { pixelSize: 2, fps: 15, clock: false, hideHud: false };
 
 test('empty storage gives the defaults', () => assert.deepEqual(loadSettings(memoryStorage()), DEFAULTS));
 

@@ -6,7 +6,7 @@ export const PIXEL_SIZES = [2, 3, 4]; // device px per art pixel
 
 const PARSE = {
   pixelSize: (v) => (PIXEL_SIZES.includes(Number(v)) ? Number(v) : 2),
-  fps: parseFps, // null: no cap
+  fps: (v) => (v === '' ? null : (parseFps(v) ?? 15)), // '' is Native (null: no cap); unset means 15
   clock: (v) => v === 'true', // the sky follows the local clock instead of the slider
   hideHud: (v) => v === 'true',
 };

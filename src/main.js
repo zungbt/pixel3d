@@ -11,12 +11,12 @@ import { createFrameLimiter } from './frame-limiter.js';
 import { createBench } from './bench.js';
 import { loadSettings, parseSetting, saveSetting } from './settings.js';
 
-// Wallpaper mode (?wallpaper): no HUD, the sky follows the local clock, and 30 fps, for this
+// Wallpaper mode (?wallpaper): no HUD, the sky follows the local clock, and 15 fps, for this
 // page only: the saved settings are left alone.
 const params = new URLSearchParams(location.search);
 const wallpaper = params.has('wallpaper');
 const settings = loadSettings();
-if (wallpaper) Object.assign(settings, { fps: 30, clock: true, hideHud: true });
+if (wallpaper) Object.assign(settings, { fps: 15, clock: true, hideHud: true });
 
 const VIEW_HEIGHT = 18; // world units visible vertically
 // Every pass renders at art resolution; the canvas is stretched to the window with
