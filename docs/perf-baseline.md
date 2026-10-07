@@ -39,3 +39,14 @@ What the original numbers show:
 - **Grass:** in a one-off A/B run, hiding the grass saved about 0.8 ms in p0 and about 0.5 ms in p1.
 - **Shadow map:** it is redrawn by every `renderer.render` of the lit scene, and that includes the normal pass. This accounts for part of p1.
 - **Composite and output:** p2 and p3 run at full screen resolution. At 960×540 they drop from about 2.5 ms to about 0.6 ms.
+
+## Grass: only the blades on screen
+
+The grass covers the whole 48×48 ground (87,914 blades), but at 16:9 only about half of it is on screen. The camera never moves, so `fitView` sorts the blades by their position on screen once. After that, a resize only changes `mesh.count`. At 16:9, 46,103 blades are drawn (52 %); at 21:9, 66 %.
+
+These numbers come from an A/B run at 1080p: main and this change took turns, three rounds each, giving 9 p50 values per side. The GPU was in its slow phase for these runs (p2 is about 0.3 ms instead of 0.13), so compare the two rows with each other, not with the table above.
+
+| | gpu p50 median (range) | p0 | p1 | p2 | p3 |
+|---|---|---|---|---|---|
+| main | 6.18 (5.29–6.84) | 2.80 | 2.71 | 0.30 | 0.12 |
+| grass culled | 4.89 (4.07–7.65) | 2.25 | 2.19 | 0.28 | 0.11 |

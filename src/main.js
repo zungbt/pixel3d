@@ -50,6 +50,7 @@ function updateFrustum() {
   camera.left = (-VIEW_HEIGHT / 2) * aspect;
   camera.right = (VIEW_HEIGHT / 2) * aspect;
   camera.updateProjectionMatrix();
+  grass.fitView(camera);
 }
 updateFrustum();
 
