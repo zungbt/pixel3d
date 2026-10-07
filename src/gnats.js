@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { heightAt, mulberry32, pondPoint } from './world.js';
+import { heightAt, mulberry32, pondEdge, pondPoint } from './world.js';
 import { ease, pick, rngFor, turn } from './motion.js';
 
 const SWARMS = 2;
@@ -19,11 +19,17 @@ const NEXT = { circle: 0.5, zip: 0.3, hang: 0.2 };
 const SCARE_R = 0.6; // a darting dragonfly this close to the centre scatters the swarm
 const COOLDOWN = 3;
 const FLEE_SPEED = 1.2;
+const LONERS = 12;
+const LONER_Y = 0.9; // a loner's centre above the ground
+const LONER_STEP = 4; // half-width of the square its next spot is picked in
+const LONER_SPEED = 0.35; // how fast its centre glides to the next spot
 
 // Dusk and dawn: a few columns of midges dance over the pond rim (a mating swarm over a
 // landmark). Each gnat circles, zips across or hangs, keeping clear of its neighbours and
 // inside the column. A dragonfly darting through scatters them, the nearest first, and they
 // drift back into the column.
+// By day a dozen loners roam the meadow: each circles its own small centre like a one-gnat
+// swarm, and that centre glides to a new open spot every so often. They hide in the grass at night.
 export function buildGnats(scene, ctx) {
   const rand = mulberry32(31);
 
@@ -42,33 +48,68 @@ export function buildGnats(scene, ctx) {
   }
   ctx.swarms.push(...swarms);
 
-  const gnats = [];
-  swarms.forEach((swarm, s) => {
-    for (let k = 0; k < PER_SWARM; k++) {
-      const r = rngFor(31, s * PER_SWARM + k);
-      const a = r() * Math.PI * 2;
-      const d = r() * COLUMN_R;
-      gnats.push({
-        swarm, k, rand: r,
-        pos: new THREE.Vector3(swarm.home.x + Math.cos(a) * d, swarm.home.y, swarm.home.z + Math.sin(a) * d),
-        vel: new THREE.Vector3(),
-        yaw: r() * Math.PI * 2 - Math.PI,
-        yawVel: 0,
-        speed: 0,
-        state: 'circle',
-        timer: r() * 3, // out of step from the start
-        spin: r() < 0.5 ? 1 : -1, // which way it circles
-        height: (r() * 2 - 1) * SPREAD_Y,
-        bob: 1.5 + r() * 2, // up-and-down rate, rad/s
-        phase: r() * Math.PI * 2,
-        pace: 0.8 + r() * 0.4,
-        reactivity: 0.35 + r() * 0.65,
-        fleeAt: Infinity, // when it notices the dragonfly
-        fleeUntil: 0,
-        from: new THREE.Vector3(), // where the scare came from
-      });
+  // Open meadow at loner height: in view, off the water, clear of trees and rocks.
+  const _p = new THREE.Vector3();
+  function isOpen(x, z) {
+    if (!ctx.inRoam(x, z) || pondEdge(x, z) < 0.3) return false;
+    _p.set(x, heightAt(x, z) + LONER_Y, z);
+    return !ctx.obstacles.some((o) => o.c.distanceTo(_p) < o.r + 0.8);
+  }
+  // A loner's next centre near (nearX, nearZ), with a clear straight glide from there.
+  // `out` is only written when one is found.
+  function openSpot(out, r, nearX, nearZ, half) {
+    for (let i = 0; i < 20; i++) {
+      const x = nearX + (r() * 2 - 1) * half;
+      const z = nearZ + (r() * 2 - 1) * half;
+      const steps = Math.max(1, Math.ceil(Math.hypot(x - nearX, z - nearZ) / 0.25));
+      let clear = true;
+      for (let j = 1; j <= steps && clear; j++) clear = isOpen(nearX + ((x - nearX) * j) / steps, nearZ + ((z - nearZ) * j) / steps);
+      if (!clear) continue;
+      out.set(x, heightAt(x, z) + LONER_Y, z);
+      return true;
     }
-  });
+    return false;
+  }
+
+  // Shaped like a swarm so the flocking code drives them; kept out of ctx.swarms, so dragonflies don't hunt them.
+  const loners = [];
+  for (let i = 0; i < LONERS; i++) {
+    const r = rngFor(32, i);
+    let x, z;
+    do (x = (r() * 2 - 1) * 11), (z = (r() * 2 - 1) * 11);
+    while (!isOpen(x, z));
+    const spot = new THREE.Vector3(x, heightAt(x, z) + LONER_Y, z);
+    loners.push({ home: spot, centre: spot.clone(), visible: 0, rand: r, timer: r() * 15, threshold: 0.15 + r() * 0.15 });
+  }
+
+  const gnats = [];
+  const members = swarms.flatMap((swarm, s) =>
+    Array.from({ length: PER_SWARM }, (_, k) => [swarm, k, rngFor(31, s * PER_SWARM + k)]),
+  );
+  for (const loner of loners) members.push([loner, 0, loner.rand]);
+  for (const [swarm, k, r] of members) {
+    const a = r() * Math.PI * 2;
+    const d = r() * COLUMN_R;
+    gnats.push({
+      swarm, k, rand: r,
+      pos: new THREE.Vector3(swarm.home.x + Math.cos(a) * d, swarm.home.y, swarm.home.z + Math.sin(a) * d),
+      vel: new THREE.Vector3(),
+      yaw: r() * Math.PI * 2 - Math.PI,
+      yawVel: 0,
+      speed: 0,
+      state: 'circle',
+      timer: r() * 3, // out of step from the start
+      spin: r() < 0.5 ? 1 : -1, // which way it circles
+      height: (r() * 2 - 1) * SPREAD_Y,
+      bob: 1.5 + r() * 2, // up-and-down rate, rad/s
+      phase: r() * Math.PI * 2,
+      pace: 0.8 + r() * 0.4,
+      reactivity: 0.35 + r() * 0.65,
+      fleeAt: Infinity, // when it notices the dragonfly
+      fleeUntil: 0,
+      from: new THREE.Vector3(), // where the scare came from
+    });
+  }
 
   // Transparent-free, unlit specks, darkened in update as the light fades. Being instanced they
   // also get the grass wind in the pixel pass's normal render; for a box this small the offset is
@@ -140,6 +181,22 @@ export function buildGnats(scene, ctx) {
         if (!swarm.visible || t - swarm.scaredAt < COOLDOWN) continue;
         const hunter = ctx.hunters.find((h) => h.state === 'dart' && h.pos.distanceTo(swarm.centre) < SCARE_R);
         if (hunter) scatter(swarm, hunter.pos, t);
+      }
+      for (const l of loners) {
+        if ((l.timer -= dt) <= 0) {
+          openSpot(l.home, l.rand, l.home.x, l.home.z, LONER_STEP);
+          l.timer = 8 + l.rand() * 12;
+        }
+        const dx = l.home.x - l.centre.x;
+        const dz = l.home.z - l.centre.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0) {
+          const step = Math.min(1, (LONER_SPEED * dt) / d);
+          l.centre.x += dx * step;
+          l.centre.z += dz * step;
+        }
+        l.centre.y = heightAt(l.centre.x, l.centre.z) + LONER_Y;
+        l.visible = sky.daylight > l.threshold ? 1 : 0;
       }
 
       // Always simulated, even when hidden, so a swarm fades in already in formation.
