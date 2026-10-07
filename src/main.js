@@ -4,7 +4,7 @@ import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelated
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
-import { buildSky, DAY_LENGTH } from './sky.js';
+import { buildSky, clockTime, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
 import { createFrameLimiter, parseFps } from './frame-limiter.js';
@@ -98,7 +98,16 @@ fpsSelect.addEventListener('change', () => {
 });
 const shouldRender = createFrameLimiter();
 
-const bench = new URLSearchParams(location.search).has('bench')
+// Wallpaper mode (?wallpaper): no HUD, the sky follows the local clock, and 30 fps (the stored
+// cap is left alone).
+const params = new URLSearchParams(location.search);
+const wallpaper = params.has('wallpaper');
+if (wallpaper) {
+  document.querySelector('#hud').style.display = 'none';
+  fpsSelect.value = '30';
+}
+
+const bench = params.has('bench')
   ? createBench(renderer, (hour) => {
       timeInput.value = hour;
       timeInput.dispatchEvent(new Event('input'));
@@ -116,7 +125,8 @@ renderer.setAnimationLoop((ms) => {
   bench?.mark('world');
   grass.update(t);
   bench?.mark('grass');
-  sky.update(t + skyOffset);
+  if (wallpaper) sky.update(t, clockTime());
+  else sky.update(t + skyOffset);
   bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');

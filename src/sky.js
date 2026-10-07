@@ -4,6 +4,12 @@ import { NOISE_GLSL } from './world.js';
 export const DAY_LENGTH = 300; // seconds for a full day-night cycle
 const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
 
+// The sky time that shows this local clock time (sunrise 06:00, sunset 18:00).
+export function clockTime(date = new Date()) {
+  const hour = date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600;
+  return (((((hour - 6) / 24 - DAY_START) % 1) + 1) % 1) * DAY_LENGTH;
+}
+
 const SUN_DAY = new THREE.Color(0xfff1d6);
 const SUN_LOW = new THREE.Color(0xffa060);
 const MOON = new THREE.Color(0x9fb4ff);
@@ -93,11 +99,12 @@ export function buildSky(scene) {
 
   return {
     state,
-    update(t) {
+    // dayT sets the time of day; t alone drives the clouds, so they keep drifting when dayT is the clock.
+    update(t, dayT = t) {
       cloudUniforms.uCloudTime.value = t;
 
-      state.phase = (t / DAY_LENGTH + DAY_START) % 1;
-      const angle = (t / DAY_LENGTH + DAY_START) * Math.PI * 2;
+      state.phase = (dayT / DAY_LENGTH + DAY_START) % 1;
+      const angle = (dayT / DAY_LENGTH + DAY_START) * Math.PI * 2;
       const elevation = Math.sin(angle); // >0 day, <0 night
       const isDay = elevation >= 0;
       const dir = isDay ? 1 : -1;
