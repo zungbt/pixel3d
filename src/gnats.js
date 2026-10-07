@@ -33,8 +33,9 @@ export function buildGnats(scene, ctx) {
     const [x, z] = pondPoint(angle, RIM);
     const home = new THREE.Vector3(x, heightAt(x, z) + COLUMN_Y, z);
     if (swarms.some((s) => s.home.distanceTo(home) < 2.5)) continue;
+    // the column centre drifts up to ~0.35 off home, and the bobs add ~0.4 to the vertical spread
     const blocked = ctx.obstacles.some(
-      (o) => Math.hypot(o.c.x - x, o.c.z - z) < o.r + COLUMN_R && Math.abs(o.c.y - home.y) < o.r + SPREAD_Y + 0.2,
+      (o) => Math.hypot(o.c.x - x, o.c.z - z) < o.r + COLUMN_R + 0.35 && Math.abs(o.c.y - home.y) < o.r + SPREAD_Y + 0.4,
     );
     if (blocked) continue;
     swarms.push({ angle, home, centre: home.clone(), visible: 0, scaredAt: -Infinity, seed: rand() * 100 });
@@ -164,7 +165,7 @@ export function buildGnats(scene, ctx) {
         g.vel.set(Math.sin(g.yaw) * g.speed, 0, Math.cos(g.yaw) * g.speed);
         g.pos.addScaledVector(g.vel, dt);
         g.pos.y = g.swarm.centre.y + g.height + Math.sin(t * g.bob + g.phase) * 0.2;
-        ctx.avoid(g.pos, g.vel, dt, 0.5, null); // vel matches the heading, so its hard push-out works
+        ctx.avoid(g.pos, g.vel, dt, 0.5, null); // placement keeps the columns clear of obstacles; this is only a backstop
       }
 
       gnats.forEach((g, i) => {
