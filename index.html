@@ -7,14 +7,24 @@
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
       canvas { display: block; }
-      #time {
-        position: fixed; left: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px;
+      #hud {
+        position: fixed; left: 12px; bottom: 12px; display: flex; align-items: center; gap: 12px;
         font: 14px monospace; color: #fff; text-shadow: 0 1px 2px #000;
       }
+      #time { display: flex; align-items: center; gap: 8px; }
+      #fps { font: inherit; }
     </style>
   </head>
   <body>
-    <label id="time"><input type="range" min="0" max="24" step="0.01" /><span></span></label>
+    <div id="hud">
+      <label id="time"><input type="range" min="0" max="24" step="0.01" /><span></span></label>
+      <select id="fps" title="Frame-rate cap">
+        <option value="">Native</option>
+        <option value="60">60 fps</option>
+        <option value="30">30 fps</option>
+        <option value="20">20 fps</option>
+      </select>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

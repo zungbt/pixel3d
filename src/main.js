@@ -7,6 +7,7 @@ import { addWind, buildGrass } from './grass.js';
 import { buildSky, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
+import { createFrameLimiter, parseFps } from './frame-limiter.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
 const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
@@ -72,8 +73,15 @@ timeInput.addEventListener('input', () => {
   skyOffset += ((((phase - sky.state.phase) % 1) + 1) % 1) * DAY_LENGTH;
 });
 
+// Frame-rate cap, remembered between visits; an unknown stored value means no cap.
+const fpsSelect = document.querySelector('#fps');
+fpsSelect.value = String(parseFps(localStorage.getItem('pixel3d.fps')) ?? '');
+fpsSelect.addEventListener('change', () => localStorage.setItem('pixel3d.fps', fpsSelect.value));
+const shouldRender = createFrameLimiter();
+
 let lastT;
 renderer.setAnimationLoop((ms) => {
+  if (!shouldRender(ms, parseFps(fpsSelect.value))) return; // skipped ticks don't advance lastT, so dt spans the gap
   const t = ms / 1000;
   const dt = lastT === undefined ? 0 : Math.min(t - lastT, 0.1); // no jumps after a hidden tab
   lastT = t;
