@@ -4,6 +4,8 @@ import { heightAt, pondEdge, pondPoint } from './world.js';
 import { pick, rngFor, turn, wrapAngle } from './motion.js';
 
 const COLORS = [0x3f7fd0, 0x4f9e5a, 0xc4533a]; // emperor blue, hawker green, common darter red
+const ROAMERS = [0x4f9e5a, 0xc4533a]; // hawker and darter hunting over the meadow, away from the water
+const ROAM_STEP = 4; // half-width of the square a roamer picks its next spot in, around where it is
 const BODY_L = 0.35; // ~5 art pixels
 const WING_L = 0.16;
 const WING_W = 0.06;
@@ -29,6 +31,8 @@ function wingsGeometry(side) {
 // rival that comes within a body length or so. Around dusk and dawn it hawks through the midge
 // swarms over its stretch. Before each straight flight it pivots in the air, then shoots off.
 // At dusk it drops into the grass near the shore.
+// A couple of roamers do the same over the open meadow instead: darts between clear spots near
+// where they are, rests on grass tips, and the night in the grass wherever they end up.
 export function buildDragonflies(scene, ctx) {
   const gradientMap = ctx.world.gradientMap;
   const shoreRocks = ctx.world.rocks.filter((r) => pondEdge(r.position.x, r.position.z) < 2.5);
@@ -37,7 +41,8 @@ export function buildDragonflies(scene, ctx) {
   const wingGeo = [wingsGeometry(-1), wingsGeometry(1)];
   const wingMat = new THREE.MeshToonMaterial({ color: 0xe4eef4, gradientMap, side: THREE.DoubleSide });
 
-  const flies = COLORS.map((color, i) => {
+  const flies = [...COLORS, ...ROAMERS].map((color, i) => {
+    const roamer = i >= COLORS.length;
     const rand = rngFor(77, i); // its own stream: one dragonfly's choices never shift another's
     const group = new THREE.Group();
     group.name = 'dragonfly';
@@ -57,8 +62,8 @@ export function buildDragonflies(scene, ctx) {
       timer: 0,
       cooldown: 0, // after a rival chase, so the pair doesn't re-trigger every frame
       flick: false,
-      home,
-      rocks: shoreRocks.filter((r) => Math.hypot(r.position.x - hx, r.position.z - hz) < 3),
+      home: roamer ? null : home,
+      rocks: roamer ? [] : shoreRocks.filter((r) => Math.hypot(r.position.x - hx, r.position.z - hz) < 3),
       threshold: 0.45 + rand() * 0.1, // daylight below this sends it into the grass
       dartSpeed: 3.4 + rand() * 1.2,
       hoverScale: 0.7 + rand() * 0.7, // longer or shorter hovers than average
@@ -71,10 +76,38 @@ export function buildDragonflies(scene, ctx) {
 
   const territoryAngle = (d) => d.home + (d.rand() * 2 - 1) * SECTOR;
 
-  // Mostly over the water near the rim, a little over the bank.
+  // Open meadow at height y over the ground: in view, off the water, clear of trees and rocks.
+  const _p = new THREE.Vector3();
+  function clearAt(x, z, y) {
+    if (!ctx.inRoam(x, z) || pondEdge(x, z) < 0.5) return false;
+    _p.set(x, heightAt(x, z) + y, z);
+    return !ctx.obstacles.some((o) => o.c.distanceTo(_p) < o.r + 0.3);
+  }
+  // A roamer's next spot near where it is, y over the ground, with a clear straight flight there.
+  // `out` is only written when one is found.
+  function meadowSpot(d, out, y) {
+    for (let i = 0; i < 20; i++) {
+      const x = d.pos.x + (d.rand() * 2 - 1) * ROAM_STEP;
+      const z = d.pos.z + (d.rand() * 2 - 1) * ROAM_STEP;
+      const steps = Math.max(1, Math.ceil(Math.hypot(x - d.pos.x, z - d.pos.z) / 0.25));
+      let clear = true;
+      for (let j = 1; j <= steps && clear; j++) clear = clearAt(d.pos.x + ((x - d.pos.x) * j) / steps, d.pos.z + ((z - d.pos.z) * j) / steps, y);
+      if (!clear) continue;
+      out.set(x, heightAt(x, z) + y, z);
+      return true;
+    }
+    return false;
+  }
+
+  // Mostly over the water near the rim, a little over the bank; a roamer anywhere open nearby
+  // (or nowhere, so it just hovers again).
   function dart(d) {
-    const [x, z] = pondPoint(territoryAngle(d), -1.2 + d.rand() * 1.8);
-    d.target.set(x, heightAt(x, z) + 0.4 + d.rand() * 0.4, z);
+    if (d.home === null) {
+      if (!meadowSpot(d, d.target, 0.4 + d.rand() * 0.4)) d.target.copy(d.pos);
+    } else {
+      const [x, z] = pondPoint(territoryAngle(d), -1.2 + d.rand() * 1.8);
+      d.target.set(x, heightAt(x, z) + 0.4 + d.rand() * 0.4, z);
+    }
     d.state = 'dart';
     d.rock = null;
     d.timer = 6; // give up and hover if it can't get there
@@ -82,6 +115,7 @@ export function buildDragonflies(scene, ctx) {
 
   // An active midge swarm over its own stretch of rim, if there is one.
   const preyFor = (d) =>
+    d.home !== null &&
     ctx.swarms.find((s) => s.visible >= 5 && Math.abs(wrapAngle(s.angle - d.home)) < SECTOR + 0.3);
 
   // A dart straight through the swarm, coming out 0.8 beyond its centre (so it doesn't hover inside it).
@@ -97,7 +131,9 @@ export function buildDragonflies(scene, ctx) {
   function toPerch(d) {
     d.rock = d.rocks.length ? d.rocks[Math.floor(d.rand() * d.rocks.length)] : null;
     if (d.rock) ctx.rockTop(d.rock, d.target);
-    else {
+    else if (d.home === null) {
+      if (!meadowSpot(d, d.target, 0.45)) return dart(d); // a grass tip
+    } else {
       const [x, z] = pondPoint(territoryAngle(d), 0.1);
       d.target.set(x, heightAt(x, z) + 0.15, z);
     }
@@ -105,9 +141,11 @@ export function buildDragonflies(scene, ctx) {
     d.timer = 6;
   }
 
-  // In the grass 1-3 units back from the shore, clear of trunks, crowns and rocks.
+  // In the grass 1-3 units back from the shore, clear of trunks, crowns and rocks; a roamer
+  // nearby, or straight below if nothing nearby is clear.
   function toSettle(d) {
-    for (let i = 0; i < 10; i++) {
+    if (d.home === null && !meadowSpot(d, d.target, 0.2)) d.target.set(d.pos.x, heightAt(d.pos.x, d.pos.z) + 0.2, d.pos.z);
+    for (let i = 0; i < 10 && d.home !== null; i++) {
       const [x, z] = pondPoint(territoryAngle(d), 1 + d.rand() * 2);
       d.target.set(x, heightAt(x, z) + 0.2, z);
       if (!ctx.obstacles.some((o) => o.c.distanceTo(d.target) < o.r + 0.1)) break;
@@ -161,6 +199,10 @@ export function buildDragonflies(scene, ctx) {
         const dark = sky.daylight < d.threshold;
         if (d.state === null) {
           // First frame: start wherever this time of day would have left it.
+          if (d.home === null) {
+            do d.pos.set((d.rand() * 2 - 1) * 11, 0, (d.rand() * 2 - 1) * 11);
+            while (!clearAt(d.pos.x, d.pos.z, 0.6));
+          }
           if (dark) {
             toSettle(d);
             d.pos.copy(d.target);
