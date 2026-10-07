@@ -69,7 +69,7 @@ export function buildButterflies(scene, ctx) {
   // Where a perched butterfly sits: on the swaying flower head, or on top of the rock.
   const _perch = new THREE.Vector3();
   function perchPoint(perch, t) {
-    if (perch.isObject3D) return _perch.copy(perch.position).setY(perch.position.y + perch.scale.y * 0.85);
+    if (perch.isObject3D) return ctx.rockTop(perch, _perch);
     const [sx, sz] = windSway(t, perch.x, perch.z, HEAD_Y);
     return _perch.set(perch.x + sx, perch.y + HEAD_R, perch.z + sz);
   }

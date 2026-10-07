@@ -55,6 +55,12 @@ export function pondEdge(x, z) {
   return d - pondRadius(theta);
 }
 
+// The point `offset` units out from the shoreline in direction theta (< 0 is in the water).
+export function pondPoint(theta, offset) {
+  const r = pondRadius(theta) + offset;
+  return [POND_X + Math.cos(theta) * r, POND_Z + Math.sin(theta) * r];
+}
+
 // Same, relative to the edge of the beach: < 1 is sand (or water).
 export function sandQ(x, z) {
   const [d, theta] = pondPolar(x, z);

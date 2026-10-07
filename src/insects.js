@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { heightAt } from './world.js';
 import { buildButterflies } from './butterflies.js';
+import { buildDragonflies } from './dragonflies.js';
 
 const ROAM_R = 13; // the part of the map that is on screen
 
@@ -26,6 +27,8 @@ function flightHelpers(world) {
   return {
     obstacles,
     inRoam: (x, z) => Math.hypot(x, z) < ROAM_R,
+    // Where an insect sits on a rock (its squashed icosahedron's top face).
+    rockTop: (rock, out) => out.copy(rock.position).setY(rock.position.y + rock.scale.y * 0.85),
 
     // Accelerate toward target, slowing down on arrival.
     steer(pos, vel, target, maxSpeed, accel, dt) {
@@ -37,7 +40,8 @@ function flightHelpers(world) {
     },
 
     // Push away from nearby obstacles (except `ignore`, e.g. the rock being landed on),
-    // hard-project out of any that were entered, and keep `minAlt` above the ground.
+    // hard-project out of any being flown into, and keep `minAlt` above the ground.
+    // Something taking off from a rock top (inside its sphere) is just pushed out, without a jump.
     avoid(pos, vel, dt, minAlt, ignore) {
       for (const o of obstacles) {
         if (o.src === ignore) continue;
@@ -47,7 +51,7 @@ function flightHelpers(world) {
         if (dist >= margin || dist === 0) continue;
         _d.divideScalar(dist);
         vel.addScaledVector(_d, ((margin - dist) / margin) * 12 * dt);
-        if (dist < o.r) pos.copy(o.c).addScaledVector(_d, o.r);
+        if (dist < o.r && vel.dot(_d) < 0) pos.copy(o.c).addScaledVector(_d, o.r);
       }
       const floor = heightAt(pos.x, pos.z) + minAlt;
       if (pos.y < floor) {
@@ -61,7 +65,7 @@ function flightHelpers(world) {
 // Every insect species; built before the sky so their toon materials get cloud shadows.
 export function buildInsects(scene, world, flowers) {
   const ctx = { world, flowers, ...flightHelpers(world) };
-  const species = [buildButterflies(scene, ctx)];
+  const species = [buildButterflies(scene, ctx), buildDragonflies(scene, ctx)];
   return {
     update(t, dt, sky) {
       for (const s of species) s.update(t, dt, sky);
