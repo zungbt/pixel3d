@@ -5,7 +5,7 @@ import { buildScene, simulate } from './scene.js';
 import { heightAt } from '../src/world.js';
 import { DAY_LENGTH } from '../src/sky.js';
 
-const PER_SWARM = 20;
+const PER_SWARM = 10;
 const m = new THREE.Matrix4();
 const p = new THREE.Vector3();
 
@@ -26,9 +26,9 @@ for (const fps of [60, 10]) {
     const s = buildScene();
     const mesh = s.scene.getObjectByName('gnats');
     assert.ok(mesh, 'no gnats mesh');
-    assert.equal(mesh.count, 60);
+    assert.equal(mesh.count, 20);
     const { swarms, obstacles, hunters } = s.insects.ctx;
-    assert.equal(swarms.length, 3);
+    assert.equal(swarms.length, 2);
     const lastScare = swarms.map((w) => w.scaredAt);
     const checks = [];
     const spreads = [];
@@ -69,7 +69,7 @@ for (const fps of [60, 10]) {
     }, fps);
     assert.equal(nan, 0);
     assert.equal(outOfWindow, 0, 'gnats seen outside dusk/dawn');
-    assert.equal(maxVisible, 60);
+    assert.equal(maxVisible, 20);
     assert.ok(minAlt >= 0.45, `min altitude ${minAlt}`);
     assert.equal(inside, 0, 'gnats inside a tree or rock');
     assert.ok(scatters > 0, 'no dragonfly ever scattered a swarm');

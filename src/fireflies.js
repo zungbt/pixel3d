@@ -3,6 +3,7 @@ import { heightAt, mulberry32, pathEdge, pondEdge, pondPoint } from './world.js'
 
 const MALES = 40;
 const FEMALES = 10;
+const LONERS = 8; // males that drift across the meadow on their own, away from the swarms
 const SIZE = 0.075; // about one art pixel
 const SPEED = 0.15;
 const FLASH = 1; // seconds lit, fading in and out
@@ -12,10 +13,12 @@ const ANSWER_DIST = 2;
 const GLOW = new THREE.Color(0xd8ff6a);
 const CLUSTERS = 4;
 const CLUSTER_R = 2; // half-width of the square each swarm keeps to
+const LONER_STEP = 3; // half-width of the square a loner picks its next spot in, around where it is
 
 // Dusk to midnight, in a few loose swarms: males drift low around their swarm, each giving a short rising ("J") flash
 // every few seconds; females wait on grass tips and answer a nearby male about 2 s later,
-// and he turns toward her. By day all of them are hidden in the grass.
+// and he turns toward her. A few lone males wander the whole meadow instead. By day all of
+// them are hidden in the grass.
 export function buildFireflies(scene, ctx) {
   const rand = mulberry32(99);
 
@@ -45,12 +48,14 @@ export function buildFireflies(scene, ctx) {
   }
 
   const flies = [];
-  for (let i = 0; i < MALES + FEMALES; i++) {
-    const home = centres[i % centres.length];
+  for (let i = 0; i < MALES + FEMALES + LONERS; i++) {
+    const loner = i >= MALES + FEMALES;
+    const home = loner ? null : centres[i % centres.length];
     const pos = new THREE.Vector3();
-    if (!openSpot(pos, home.x, home.z, CLUSTER_R)) pos.copy(home);
+    if (loner) while (!openSpot(pos, 0, 0, 11));
+    else if (!openSpot(pos, home.x, home.z, CLUSTER_R)) pos.copy(home);
     flies.push({
-      male: i < MALES,
+      male: i < MALES || loner,
       home,
       pos,
       vel: new THREE.Vector3(),
@@ -72,13 +77,15 @@ export function buildFireflies(scene, ctx) {
     new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }),
     flies.length,
   );
+  mesh.name = 'fireflies';
   mesh.frustumCulled = false; // instances move, and start hidden at scale 0
   scene.add(mesh);
   const matrix = new THREE.Matrix4();
   const color = new THREE.Color();
 
   function wander(f) {
-    if (openSpot(f.target, f.home.x, f.home.z, CLUSTER_R)) f.target.y += rand() * 0.95; // 0.25-1.2 up
+    const [x, z, r] = f.home ? [f.home.x, f.home.z, CLUSTER_R] : [f.pos.x, f.pos.z, LONER_STEP];
+    if (openSpot(f.target, x, z, r)) f.target.y += rand() * 0.95; // 0.25-1.2 up
   }
 
   return {

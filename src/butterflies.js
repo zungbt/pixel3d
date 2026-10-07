@@ -1,16 +1,18 @@
 import * as THREE from 'three';
-import { heightAt } from './world.js';
+import { heightAt, pondEdge } from './world.js';
 import { pick, rngFor, turn } from './motion.js';
 import { windSway } from './grass.js';
 import { HEAD_R, HEAD_Y } from './flowers.js';
 
-const COUNT = 8;
+const COUNT = 12;
 const COLORS = [0xf3f0e6, 0xf0d860, 0xe8964a, 0x8fb4ee]; // cabbage white, brimstone, orange tip, blue
 const WING_W = 0.12; // one wing: half the ~0.25 wingspan, so ~4 art pixels across
 const WING_L = 0.1;
 const ACCEL = 3;
 const FOLDED = Math.PI / 2 - 0.08; // wings closed together over the back
 const NEAR = 3; // usual hop to the next flower
+const FAR = 10; // the longer hop, to another patch, or a wander over the meadow
+const CROWD = 2.5; // a flower this close to another butterfly, or to where it's headed, is taken
 
 // A flat wing hinged on the body axis (local z), extending to one side.
 function wingGeometry(side) {
@@ -61,9 +63,54 @@ export function buildButterflies(scene, ctx) {
   }
 
   const randomHead = (rand) => heads[Math.floor(rand() * heads.length)];
-  function headNear(p, maxDist, rand) {
-    const near = heads.filter((h) => Math.hypot(h.x - p.x, h.z - p.z) < maxDist);
-    return near.length ? near[Math.floor(rand() * near.length)] : randomHead(rand);
+  // Free flowers: not near another butterfly or where it's headed (all of them if none are).
+  function freeHeads(b) {
+    const crowded = (h) =>
+      flies.some((o) => {
+        if (o === b) return false;
+        const at = o.perch?.isObject3D ? o.perch.position : o.perch;
+        return Math.hypot(h.x - o.pos.x, h.z - o.pos.z) < CROWD || (at && Math.hypot(h.x - at.x, h.z - at.z) < CROWD);
+      });
+    const free = heads.filter((h) => !crowded(h));
+    return free.length ? free : heads;
+  }
+  // A random free flower within maxDist of b (then FAR, then anywhere).
+  function headNear(b, maxDist) {
+    const pool = freeHeads(b);
+    for (const r of [maxDist, FAR]) {
+      const near = pool.filter((h) => Math.hypot(h.x - b.pos.x, h.z - b.pos.z) < r);
+      if (near.length) return near[Math.floor(b.rand() * near.length)];
+    }
+    return pool[Math.floor(b.rand() * pool.length)];
+  }
+  // A random point within FAR of b, in view and off the water.
+  function pointNear(b, out) {
+    do {
+      const a = b.rand() * Math.PI * 2;
+      const r = FAR * Math.sqrt(b.rand()); // uniform over the disc
+      out.x = b.pos.x + Math.cos(a) * r;
+      out.z = b.pos.z + Math.sin(a) * r;
+    } while (!ctx.inRoam(out.x, out.z) || pondEdge(out.x, out.z) < 0);
+    return out;
+  }
+  // The long hop: the free flower nearest a random point, so a lone flower in a bare stretch
+  // (across the path, say) gets as many visits as the ground it stands for.
+  function headByArea(b) {
+    const p = pointNear(b, {});
+    let best;
+    for (const h of freeHeads(b)) if (!best || Math.hypot(h.x - p.x, h.z - p.z) < Math.hypot(best.x - p.x, best.z - p.z)) best = h;
+    return best;
+  }
+  // A wander: open air at its cruising height somewhere within FAR, clear of trees and rocks.
+  const _c = new THREE.Vector3();
+  function airNear(b) {
+    const spot = { air: true, x: 0, y: 0, z: 0 };
+    for (let i = 0; i < 10; i++) {
+      pointNear(b, spot);
+      spot.y = heightAt(spot.x, spot.z) + b.alt;
+      if (!ctx.obstacles.some((o) => o.c.distanceTo(_c.set(spot.x, spot.y, spot.z)) < o.r + 0.3)) return spot;
+    }
+    return headByArea(b);
   }
   function nearestHead(p) {
     let best = heads[0];
@@ -71,9 +118,11 @@ export function buildButterflies(scene, ctx) {
     return best;
   }
 
-  // Where a perched butterfly sits: on the swaying flower head, or on top of the rock.
+  // Where a perched butterfly sits: on the swaying flower head, or on top of the rock
+  // (or, for a wander, the point in the air it's heading for).
   const _perch = new THREE.Vector3();
   function perchPoint(perch, t) {
+    if (perch.air) return _perch.set(perch.x, perch.y, perch.z);
     if (perch.isObject3D) return ctx.rockTop(perch, _perch);
     const [sx, sz] = windSway(t, perch.x, perch.z, HEAD_Y);
     return _perch.set(perch.x + sx, perch.y + HEAD_R, perch.z + sz);
@@ -82,14 +131,17 @@ export function buildButterflies(scene, ctx) {
   function flyTo(b, state, perch) {
     b.state = state;
     b.perch = perch;
-    b.timer = 15; // give up and pick again if it can't get there
+    const at = perch.isObject3D ? perch.position : perch;
+    // give up and pick again if it can't get there; long hops get longer
+    b.timer = 15 + (1.5 * Math.hypot(at.x - b.pos.x, at.z - b.pos.z)) / b.speed;
   }
 
   function nextAfterFeeding(b) {
     const warmRocks = rocks.filter((rock) => rock.position.distanceTo(b.pos) < 5);
-    const next = pick(b.rand, { bask: warmRocks.length ? b.bask : 0, near: 0.73, far: 0.15 });
+    const next = pick(b.rand, { bask: warmRocks.length ? b.bask : 0, near: 0.5, far: 0.3, wander: 0.15 });
     if (next === 'bask') flyTo(b, 'toBask', warmRocks[Math.floor(b.rand() * warmRocks.length)]);
-    else flyTo(b, 'fly', headNear(b.pos, next === 'near' ? NEAR : 8, b.rand));
+    else if (next === 'wander') flyTo(b, 'fly', airNear(b));
+    else flyTo(b, 'fly', next === 'near' ? headNear(b, NEAR) : headByArea(b));
   }
 
   const _aim = new THREE.Vector3();
@@ -128,19 +180,22 @@ export function buildButterflies(scene, ctx) {
           b.perch = randomHead(b.rand);
           b.pos.copy(perchPoint(b.perch, t));
           if (dark) b.state = 'roost';
-          else flyTo(b, 'fly', headNear(b.pos, NEAR, b.rand));
+          else flyTo(b, 'fly', headNear(b, NEAR));
         }
 
         if (b.state === 'roost') {
-          if (sky.daylight > b.threshold + 0.05) flyTo(b, 'fly', headNear(b.pos, NEAR, b.rand));
+          if (sky.daylight > b.threshold + 0.05) flyTo(b, 'fly', headNear(b, NEAR));
         } else if (dark && b.state !== 'toRoost') {
           flyTo(b, 'toRoost', nearestHead(b.pos));
         }
 
         const flying = b.state === 'fly' || b.state === 'toBask' || b.state === 'toRoost';
         if (flying) {
-          if (fly(b, t, dt)) land(b);
-          else if (b.timer <= 0) flyTo(b, b.state === 'toRoost' ? 'toRoost' : 'fly', headNear(b.pos, 8, b.rand));
+          // A wander ends in the air; from there it looks for a flower close by.
+          if (fly(b, t, dt)) {
+            if (b.perch.air) flyTo(b, 'fly', headNear(b, NEAR));
+            else land(b);
+          } else if (b.timer <= 0) flyTo(b, b.state === 'toRoost' ? 'toRoost' : 'fly', headNear(b, FAR));
         } else {
           b.pos.copy(perchPoint(b.perch, t));
           if (b.state !== 'roost' && (b.timer -= dt) <= 0) nextAfterFeeding(b);
