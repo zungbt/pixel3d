@@ -1,27 +1,27 @@
 # pixel3d
 
-Cảnh 3D pixel-art viết bằng [three.js](https://threejs.org/) + [Vite]: đồng cỏ có gió, ao, đường đất, cây, đá, mây và chu kỳ ngày–đêm, render qua `RenderPixelatedPass`.
+A pixel-art 3D scene built with [three.js](https://threejs.org/) + [Vite]: windswept grass, a pond, a dirt path, trees, rocks, clouds and a day–night cycle, rendered through `RenderPixelatedPass`.
 
-## Chạy
+## Running
 
 ```bash
 npm install
 npm run dev        # http://127.0.0.1:5173/
-npm run build      # build ra dist/
-npm run preview    # xem bản build
+npm run build      # build into dist/
+npm run preview    # serve the build
 ```
 
-## Cấu trúc
+## Layout
 
-| File | Nội dung |
+| File | Contents |
 |---|---|
-| `src/main.js` | Renderer, camera orthographic (`VIEW_HEIGHT`, `PIXEL_SIZE`), post-processing, vòng lặp render |
-| `src/world.js` | Mặt đất, ao, đường đất, cây, đá; `SIZE` của map; noise/PRNG dùng chung |
-| `src/grass.js` | Cỏ instanced + shader gió |
-| `src/sky.js` | Mặt trời, chu kỳ ngày–đêm, mây và bóng mây |
+| `src/main.js` | Renderer, orthographic camera (`VIEW_HEIGHT`, `PIXEL_SIZE`), post-processing, render loop |
+| `src/world.js` | Ground, pond, dirt path, trees, rocks; map `SIZE`; shared noise/PRNG |
+| `src/grass.js` | Instanced grass + wind shader |
+| `src/sky.js` | Sun, day–night cycle, clouds and cloud shadows |
 
-## Quy ước làm việc
+## Conventions
 
-Branch, commit, version và release: xem [CONTRIBUTING.md](CONTRIBUTING.md).
+Branches, commits, versioning and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [Vite]: https://vite.dev/

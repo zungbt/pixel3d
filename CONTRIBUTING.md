@@ -1,71 +1,71 @@
-# Quy ước làm việc
+# Contributing
 
-## 1. Branch
+## 1. Branches
 
-- `main` luôn chạy được. **Không commit thẳng lên `main`.**
-- Mỗi feature/fix một nhánh, tách từ `main` mới nhất:
+- `main` always runs. **Never commit directly to `main`.**
+- One branch per feature/fix, cut from the latest `main`:
 
-  | Prefix | Dùng khi |
+  | Prefix | Use for |
   |---|---|
-  | `feat/<tên>` | Thêm tính năng (`feat/zoom-out`, `feat/dirt-path`) |
-  | `fix/<tên>` | Sửa lỗi (`fix/grass-under-rocks`) |
-  | `refactor/<tên>` | Sắp xếp lại code, không đổi hành vi |
-  | `docs/<tên>` | Chỉ sửa tài liệu |
+  | `feat/<name>` | New features (`feat/zoom-out`, `feat/dirt-path`) |
+  | `fix/<name>` | Bug fixes (`fix/grass-under-rocks`) |
+  | `refactor/<name>` | Code restructuring with no behaviour change |
+  | `docs/<name>` | Documentation only |
 
-  Tên nhánh: chữ thường, nối bằng `-`.
+  Branch names: lowercase, words joined with `-`.
 
 ```bash
 git switch main && git pull
-git switch -c feat/<tên>
+git switch -c feat/<name>
 ```
 
-## 2. Commit
+## 2. Commits
 
-- Mỗi commit một ý, message tiếng Anh, dòng đầu ngắn gọn mô tả *cái gì đổi*:
+- One idea per commit, message in English; the first line briefly says *what changed*:
   - `Zoom out: VIEW_HEIGHT 13 -> 18`
   - `fix: vColor is vec4 in three r186`
-- Trước khi commit: `npm run build` phải qua, và mở `npm run dev` xem lại cảnh bằng mắt (thay đổi hình ảnh không có test tự động).
+- Before committing: `npm run build` must pass, and check the scene by eye with `npm run dev` (visual changes have no automated tests).
 
-## 3. Merge vào `main`
+## 3. Merging into `main`
 
-Merge bằng `--no-ff` để lịch sử giữ lại từng nhánh feature:
+Merge with `--no-ff` so history keeps each feature branch:
 
 ```bash
 git switch main && git pull
-git merge --no-ff feat/<tên> -m "merge feat/<tên>: <tóm tắt>"
+git merge --no-ff feat/<name> -m "merge feat/<name>: <summary>"
 git push origin main
-git branch -d feat/<tên>
+git branch -d feat/<name>
 ```
 
-## 4. Version (SemVer)
+## 4. Versioning (SemVer)
 
-Version có dạng `MAJOR.MINOR.PATCH`, được ghi ở **hai nơi luôn khớp nhau**: `version` trong `package.json` và git tag `vX.Y.Z`.
+Versions take the form `MAJOR.MINOR.PATCH` and live in **two places that must always match**: `version` in `package.json` and the git tag `vX.Y.Z`.
 
-| Tăng | Khi nào | Ví dụ |
+| Bump | When | Example |
 |---|---|---|
-| `PATCH` | Sửa lỗi, chỉnh nhỏ (màu, thông số) | `0.1.0` → `0.1.1` |
-| `MINOR` | Thêm feature mới | `0.1.1` → `0.2.0` |
-| `MAJOR` | Thay đổi lớn / phá vỡ cách dùng cũ; `1.0.0` = bản chính thức đầu tiên | `0.9.0` → `1.0.0` |
+| `PATCH` | Bug fixes, small tweaks (colours, parameters) | `0.1.0` → `0.1.1` |
+| `MINOR` | New features | `0.1.1` → `0.2.0` |
+| `MAJOR` | Large or breaking changes; `1.0.0` = first official release | `0.9.0` → `1.0.0` |
 
-Không phải merge nào cũng ra version — gom vài feature rồi release một lần cũng được.
+Not every merge needs a version — batching several features into one release is fine.
 
-## 5. Release
+## 5. Releasing
 
-Trên `main`, sau khi đã merge xong:
+On `main`, once everything is merged:
 
 ```bash
 git switch main && git pull
-npm version minor -m "release v%s"   # hoặc patch / major
+npm version minor -m "release v%s"   # or patch / major
 git push origin main --tags
 ```
 
-`npm version` tự sửa `package.json` + `package-lock.json`, tạo commit `release vX.Y.Z` và tag `vX.Y.Z`.
+`npm version` updates `package.json` + `package-lock.json`, creates a `release vX.Y.Z` commit and the `vX.Y.Z` tag.
 
-## 6. Tra cứu version
+## 6. Looking up versions
 
 ```bash
-git tag -n                          # danh sách version
-git switch --detach v0.1.0          # xem lại một bản cũ (quay về: git switch main)
-git diff v0.1.0 v0.2.0              # so sánh hai bản
-git log --merges --oneline v0.1.0..v0.2.0   # các feature/fix có trong một release
+git tag -n                                  # list versions
+git switch --detach v0.1.0                  # inspect an old version (back: git switch main)
+git diff v0.1.0 v0.2.0                      # compare two versions
+git log --merges --oneline v0.1.0..v0.2.0   # features/fixes included in a release
 ```
