@@ -2,6 +2,7 @@
 
 A pixel-art 3D scene built with [three.js](https://threejs.org/) + [Vite]: windswept grass, wildflowers, butterflies, dragonflies, fireflies and gnats, a pond, a dirt path, trees, rocks, clouds and a day–night cycle, rendered through `RenderPixelatedPass`.
 
+![The meadow at 17:00: gnat swarms over the pond rim, dragonflies hunting](docs/meadow.gif)
 
 ## Running
 
