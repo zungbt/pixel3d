@@ -11,10 +11,15 @@ import { createFrameLimiter, parseFps } from './frame-limiter.js';
 import { createBench } from './bench.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
-const PIXEL_SIZE = 4; // CSS px per art pixel
+const PIXEL_SIZE = 3; // device px per art pixel
 // Every pass renders at art resolution; the canvas is stretched to the window with
 // image-rendering: pixelated (index.html), so composite and output run once per art pixel.
-const artSize = () => [Math.floor(window.innerWidth / PIXEL_SIZE), Math.floor(window.innerHeight / PIXEL_SIZE)];
+// Sized in device pixels, so browser zoom and display scaling keep every art pixel the same
+// whole number of screen pixels instead of an uneven 4-or-5.
+const artSize = () => [
+  Math.floor((window.innerWidth * devicePixelRatio) / PIXEL_SIZE),
+  Math.floor((window.innerHeight * devicePixelRatio) / PIXEL_SIZE),
+];
 
 const renderer = new THREE.WebGLRenderer();
 renderer.setSize(...artSize(), false);
