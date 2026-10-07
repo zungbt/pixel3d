@@ -1,15 +1,17 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { heightAt, mulberry32, pondEdge, pondPoint } from './world.js';
+import { heightAt, pondEdge, pondPoint } from './world.js';
+import { pick, rngFor, turn, wrapAngle } from './motion.js';
 
 const COLORS = [0x3f7fd0, 0x4f9e5a, 0xc4533a]; // emperor blue, hawker green, common darter red
 const BODY_L = 0.35; // ~5 art pixels
 const WING_L = 0.16;
 const WING_W = 0.06;
-const DART_SPEED = 4;
 const DART_ACCEL = 30; // reaches full speed in ~0.13 s
 const SECTOR = 0.9; // half-width (radians) of each territory around the rim
 const FLICK = 0.35; // wing angle, alternating sign every frame in flight
+const FACING = 0.3; // radians: a straight flight only sets off once the body points this close to its target
+const HUNT = 0.35; // chance, after a hover, of a pass through a midge swarm over its own stretch of rim
 
 // Front and hind wing on one side, flat, hinged on the body axis (local z).
 function wingsGeometry(side) {
@@ -24,9 +26,10 @@ function wingsGeometry(side) {
 
 // Day: each one holds a stretch of the pond rim, patrolling it in fast straight darts with
 // hovers between, perching on a shore rock (or the rim) now and then, and chasing off any
-// rival that comes within a body length or so. At dusk it drops into the grass near the shore.
+// rival that comes within a body length or so. Around dusk and dawn it hawks through the midge
+// swarms over its stretch. Before each straight flight it pivots in the air, then shoots off.
+// At dusk it drops into the grass near the shore.
 export function buildDragonflies(scene, ctx) {
-  const rand = mulberry32(77);
   const gradientMap = ctx.world.gradientMap;
   const shoreRocks = ctx.world.rocks.filter((r) => pondEdge(r.position.x, r.position.z) < 2.5);
 
@@ -35,7 +38,9 @@ export function buildDragonflies(scene, ctx) {
   const wingMat = new THREE.MeshToonMaterial({ color: 0xe4eef4, gradientMap, side: THREE.DoubleSide });
 
   const flies = COLORS.map((color, i) => {
+    const rand = rngFor(77, i); // its own stream: one dragonfly's choices never shift another's
     const group = new THREE.Group();
+    group.name = 'dragonfly';
     const left = new THREE.Mesh(wingGeo[0], wingMat);
     const right = new THREE.Mesh(wingGeo[1], wingMat);
     group.add(new THREE.Mesh(bodyGeo, new THREE.MeshToonMaterial({ color, gradientMap })), left, right);
@@ -43,7 +48,7 @@ export function buildDragonflies(scene, ctx) {
     const home = (i / COLORS.length) * Math.PI * 2 + 0.4;
     const [hx, hz] = pondPoint(home, 0);
     return {
-      group, left, right,
+      group, left, right, rand,
       pos: new THREE.Vector3(),
       vel: new THREE.Vector3(),
       target: new THREE.Vector3(),
@@ -55,22 +60,42 @@ export function buildDragonflies(scene, ctx) {
       home,
       rocks: shoreRocks.filter((r) => Math.hypot(r.position.x - hx, r.position.z - hz) < 3),
       threshold: 0.45 + rand() * 0.1, // daylight below this sends it into the grass
+      dartSpeed: 3.4 + rand() * 1.2,
+      hoverScale: 0.7 + rand() * 0.7, // longer or shorter hovers than average
+      perchChance: 0.15 + rand() * 0.2,
+      yaw: 0, // body heading, swung round by turn()
+      yawVel: 0,
     };
   });
+  ctx.hunters.push(...flies);
 
-  const territoryAngle = (d) => d.home + (rand() * 2 - 1) * SECTOR;
+  const territoryAngle = (d) => d.home + (d.rand() * 2 - 1) * SECTOR;
 
   // Mostly over the water near the rim, a little over the bank.
   function dart(d) {
-    const [x, z] = pondPoint(territoryAngle(d), -1.2 + rand() * 1.8);
-    d.target.set(x, heightAt(x, z) + 0.4 + rand() * 0.4, z);
+    const [x, z] = pondPoint(territoryAngle(d), -1.2 + d.rand() * 1.8);
+    d.target.set(x, heightAt(x, z) + 0.4 + d.rand() * 0.4, z);
     d.state = 'dart';
     d.rock = null;
     d.timer = 6; // give up and hover if it can't get there
   }
 
+  // An active midge swarm over its own stretch of rim, if there is one.
+  const preyFor = (d) =>
+    ctx.swarms.find((s) => s.visible >= 5 && Math.abs(wrapAngle(s.angle - d.home)) < SECTOR + 0.3);
+
+  // A dart straight through the swarm, coming out 0.8 beyond its centre (so it doesn't hover inside it).
+  const _dir = new THREE.Vector3();
+  function hunt(d, swarm) {
+    _dir.set(swarm.centre.x - d.pos.x, 0, swarm.centre.z - d.pos.z).normalize();
+    d.target.copy(swarm.centre).addScaledVector(_dir, 0.8);
+    d.state = 'dart';
+    d.rock = null;
+    d.timer = 6;
+  }
+
   function toPerch(d) {
-    d.rock = d.rocks.length ? d.rocks[Math.floor(rand() * d.rocks.length)] : null;
+    d.rock = d.rocks.length ? d.rocks[Math.floor(d.rand() * d.rocks.length)] : null;
     if (d.rock) ctx.rockTop(d.rock, d.target);
     else {
       const [x, z] = pondPoint(territoryAngle(d), 0.1);
@@ -83,7 +108,7 @@ export function buildDragonflies(scene, ctx) {
   // In the grass 1-3 units back from the shore, clear of trunks, crowns and rocks.
   function toSettle(d) {
     for (let i = 0; i < 10; i++) {
-      const [x, z] = pondPoint(territoryAngle(d), 1 + rand() * 2);
+      const [x, z] = pondPoint(territoryAngle(d), 1 + d.rand() * 2);
       d.target.set(x, heightAt(x, z) + 0.2, z);
       if (!ctx.obstacles.some((o) => o.c.distanceTo(d.target) < o.r + 0.1)) break;
     }
@@ -95,12 +120,16 @@ export function buildDragonflies(scene, ctx) {
   function hover(d) {
     d.target.copy(d.pos);
     d.state = 'hover';
-    d.timer = 0.5 + rand() * 1.5;
+    d.timer = (0.5 + d.rand() * 1.5) * d.hoverScale;
   }
 
-  // Straight-line flight to d.target; true on arrival.
+  // Straight-line flight to d.target; true on arrival. Until the body faces the target it
+  // brakes instead (steering toward where it already is), so a re-dart never slides sideways.
   function flyTo(d, dt) {
-    ctx.steer(d.pos, d.vel, d.target, DART_SPEED, DART_ACCEL, dt);
+    const dx = d.target.x - d.pos.x;
+    const dz = d.target.z - d.pos.z;
+    const facing = Math.hypot(dx, dz) < 0.3 || Math.abs(wrapAngle(Math.atan2(dx, dz) - d.yaw)) < FACING;
+    ctx.steer(d.pos, d.vel, facing ? d.target : d.pos, d.dartSpeed, DART_ACCEL, dt);
     ctx.avoid(d.pos, d.vel, dt, 0.15, d.rock);
     d.pos.addScaledVector(d.vel, dt);
     d.timer -= dt;
@@ -113,13 +142,18 @@ export function buildDragonflies(scene, ctx) {
   const _aim = new THREE.Vector3();
   function hoverStep(d, dt) {
     // Holds station with tiny corrections.
-    _aim.set(d.target.x + (rand() - 0.5) * 0.1, d.target.y + (rand() - 0.5) * 0.06, d.target.z + (rand() - 0.5) * 0.1);
+    _aim.set(
+      d.target.x + (d.rand() - 0.5) * 0.1,
+      d.target.y + (d.rand() - 0.5) * 0.06,
+      d.target.z + (d.rand() - 0.5) * 0.1,
+    );
     ctx.steer(d.pos, d.vel, _aim, 0.4, 6, dt);
     ctx.avoid(d.pos, d.vel, dt, 0.15, null);
     d.pos.addScaledVector(d.vel, dt);
   }
 
   const flying = (d) => d.state !== 'perch' && d.state !== 'settle';
+  const straight = (d) => d.state === 'dart' || d.state === 'toPerch' || d.state === 'toSettle';
 
   return {
     update(t, dt, sky) {
@@ -152,12 +186,16 @@ export function buildDragonflies(scene, ctx) {
           case 'hover':
             hoverStep(d, dt);
             if ((d.timer -= dt) <= 0) {
-              if (rand() < 0.25) toPerch(d);
+              const prey = preyFor(d);
+              const huntChance = prey ? HUNT : 0;
+              const next = pick(d.rand, { dart: 1 - d.perchChance - huntChance, perch: d.perchChance, hunt: huntChance });
+              if (next === 'perch') toPerch(d);
+              else if (next === 'hunt') hunt(d, prey);
               else dart(d);
             }
             break;
           case 'toPerch':
-            if (flyTo(d, dt)) (d.state = 'perch'), (d.timer = 3 + rand() * 7);
+            if (flyTo(d, dt)) (d.state = 'perch'), (d.timer = 3 + d.rand() * 7);
             else if (d.timer <= 0) dart(d);
             break;
           case 'perch':
@@ -184,7 +222,11 @@ export function buildDragonflies(scene, ctx) {
 
       for (const d of flies) {
         d.group.position.copy(d.pos);
-        if (d.vel.lengthSq() > 0.09) d.group.rotation.y = Math.atan2(d.vel.x, d.vel.z);
+        // The body swings round on a spring (at most 10 rad/s): toward the target on a straight
+        // flight, along its drift in a hover, and stays put at rest.
+        if (straight(d)) turn(d, Math.atan2(d.target.x - d.pos.x, d.target.z - d.pos.z), dt, 60, 14, 10);
+        else if (d.state === 'hover' && d.vel.lengthSq() > 0.09) turn(d, Math.atan2(d.vel.x, d.vel.z), dt, 60, 14, 10);
+        d.group.rotation.y = d.yaw;
         // Wings beat too fast to see: alternate up/down every frame in flight, flat out at rest.
         let wing = 0;
         if (flying(d)) {
