@@ -103,6 +103,11 @@ export function grassDensity(x, z, mask, rocks) {
   return underCanopy(mask, x, z) ? density * 0.25 : density;
 }
 
+// Module level: a closure inside fitView would share its scope and keep the sorting copies alive.
+function freeArray() {
+  this.array = null;
+}
+
 export function buildGrass(scene, world) {
   const material = new THREE.MeshToonMaterial({ gradientMap: world.gradientMap, side: THREE.DoubleSide });
   material.onBeforeCompile = (shader) => {
@@ -154,7 +159,7 @@ export function buildGrass(scene, world) {
         camera.updateMatrixWorld();
         const p = new THREE.Vector3();
         const kept = [];
-        for (let i = 0; i < placed.length; i++) {
+        for (let i = 0; i < mesh.instanceMatrix.count; i++) {
           p.fromArray(mesh.instanceMatrix.array, i * 16 + 12).applyMatrix4(camera.matrixWorldInverse);
           if (Math.abs(p.y) < camera.top + VIEW_MARGIN) kept.push([Math.abs(p.x), i]);
         }
@@ -167,6 +172,12 @@ export function buildGrass(scene, world) {
         });
         mesh.instanceMatrix.needsUpdate = true;
         mesh.instanceColor.needsUpdate = true;
+        // Nothing reads or writes them again: free ~6 MB of CPU copies after the GPU upload.
+        // A lost WebGL context would need them back, so main.js reloads the page instead. The
+        // bounding sphere (culling and sorting) is read from them lazily, so compute it now.
+        mesh.computeBoundingSphere();
+        mesh.instanceMatrix.onUpload(freeArray);
+        mesh.instanceColor.onUpload(freeArray);
         edges = kept.map(([x]) => x);
       }
       let n = 0; // first blade past the side edges
