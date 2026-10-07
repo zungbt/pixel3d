@@ -7,6 +7,7 @@ const Z = -2.75; // open grass left of the path, no tree within 2.8 units
 const POST_H = 1.6;
 const R = 0.5; // face radius before SCALE
 const SCALE = 1.3; // face ~40 art pixels across at pixel size 2 on 1080p
+const CREAM = new THREE.Color(0xf3ead2);
 
 // Hand angles in radians, clockwise from 12.
 export function handAngles(date) {
@@ -31,7 +32,7 @@ export function buildClock(scene, world) {
   const iron = new THREE.MeshToonMaterial({ color: 0x3a4044, gradientMap });
   const ink = new THREE.MeshToonMaterial({ color: 0x23262b, gradientMap });
   // The face glows a warm cream, brighter after sunset like a lit street clock.
-  const face = new THREE.MeshToonMaterial({ color: 0xf3ead2, emissive: 0xffd890, emissiveIntensity: 0, gradientMap });
+  const face = new THREE.MeshToonMaterial({ color: CREAM, emissive: 0xffd890, emissiveIntensity: 0, gradientMap });
 
   const clock = new THREE.Group();
   clock.position.set(X, heightAt(X, Z), Z);
@@ -71,11 +72,14 @@ export function buildClock(scene, world) {
 
   return {
     object: clock,
-    update(date, daylight) {
+    // sky: sky.state (daylight, fog, fogColor).
+    update(date, { daylight, fog, fogColor }) {
       const { hour, minute } = handAngles(date);
       hourHand.rotation.z = -hour; // clockwise seen from the front
       minuteHand.rotation.z = -minute;
-      face.emissiveIntensity = 0.25 + 0.25 * (1 - daylight); // faces away from the sun, so a little by day too
+      face.emissiveIntensity = (0.25 + 0.25 * (1 - daylight)) * (1 - 0.6 * fog); // faces away from the sun, so a little by day too
+      // The ground fog barely reaches the face, so haze it here: duller and tinted by the fog.
+      face.color.lerpColors(CREAM, fogColor, 0.35 * fog);
     },
   };
 }

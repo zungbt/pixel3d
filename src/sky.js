@@ -137,8 +137,8 @@ export function buildSky(scene) {
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
 
-  // Read by the insects each frame; phase 0 -> 0.5 is day, 0.5 is sunset.
-  const state = { phase: 0, elevation: 0, daylight: 0 };
+  // Read by the insects and the clock each frame; phase 0 -> 0.5 is day, 0.5 is sunset.
+  const state = { phase: 0, elevation: 0, daylight: 0, fog: 0, fogColor: cloudUniforms.uFogColor.value };
 
   return {
     state,
@@ -176,7 +176,7 @@ export function buildSky(scene) {
       // moon shadows at ~60% of the lit ground instead of near black.
       hemi.intensity = THREE.MathUtils.lerp(2.1, 1.2, twilight);
       scene.background.lerpColors(SKY_NIGHT, SKY_DAY, daylight).lerp(SKY_DUSK, dusk * 0.6);
-      cloudUniforms.uFogAmount.value = fogAmount(fog.mode, elevation, fog.winter);
+      state.fog = cloudUniforms.uFogAmount.value = fogAmount(fog.mode, elevation, fog.winter);
       cloudUniforms.uFogColor.value.lerpColors(FOG_NIGHT, FOG_DAY, daylight).lerp(SKY_DUSK, dusk * 0.3);
     },
   };

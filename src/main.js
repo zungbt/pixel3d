@@ -163,7 +163,7 @@ renderer.setAnimationLoop((ms) => {
   bench?.mark('sky');
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');
-  clock.update(now, sky.state.daylight);
+  clock.update(now, sky.state);
   const hour = phaseToHour(sky.state.phase, sun);
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
