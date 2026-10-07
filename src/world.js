@@ -91,9 +91,30 @@ function pathDist(x, z) {
   return Math.abs(x - (PATH.x0 + PATH.amp * Math.sin(a))) / Math.sqrt(1 + slope * slope);
 }
 
-// Distance from the path edge: < 0 is on the path.
-export function pathEdge(x, z) {
+function mainPathEdge(x, z) {
   return pathDist(x, z) - pathHalfW(x, z);
+}
+
+// Branch path: leaves the main path left of the pond, runs between the pond and the rocks
+// along z = z0 + a * (1 - exp(-(x - x0) / a)), and narrows into the grass at x1. It was added
+// after the layout was fixed, so trees and rocks are placed against the main path only (none
+// stands on the branch) and keep their places. Starts at the main path's centreline, so its
+// cut-off end is hidden inside the main path.
+const BRANCH = { z0: 1.4, a: 5.5, x1: 15, taper: 3, width: 0.82 };
+const BRANCH_X0 = PATH.x0 + PATH.amp * Math.sin(BRANCH.z0 * PATH.freq + PATH.phase);
+
+function branchEdge(x, z) {
+  if (x < BRANCH_X0) return Infinity;
+  const k = Math.exp(-(x - BRANCH_X0) / BRANCH.a); // also the curve's slope
+  const dist = Math.abs(z - (BRANCH.z0 + BRANCH.a * (1 - k))) / Math.sqrt(1 + k * k);
+  // Same ragged edge as the main path, varying along x since the branch runs along x.
+  const halfW = pathHalfW(z, x) * BRANCH.width * (1 - THREE.MathUtils.smoothstep(x, BRANCH.x1 - BRANCH.taper, BRANCH.x1));
+  return dist - halfW;
+}
+
+// Distance from the edge of either path: < 0 is on a path.
+export function pathEdge(x, z) {
+  return Math.min(mainPathEdge(x, z), branchEdge(x, z));
 }
 
 // Smooth 2D value noise in [0, 1], used as density maps for placement.
@@ -189,7 +210,16 @@ function buildGround(gradientMap) {
           float slope = ${f(PATH.amp * PATH.freq)} * cos( a );
           float dist = abs( x - ( ${f(PATH.x0)} + ${f(PATH.amp)} * sin( a ) ) ) / sqrt( 1.0 + slope * slope );
           float halfW = ${f(PATH_W.base)} + ${f(PATH_W.a1)} * sin( z * ${f(PATH_W.f1)} ) + ${f(PATH_W.a2)} * sin( z * ${f(PATH_W.f2)} + x );
-          if ( dist < halfW ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor.rgb;
+          bool onPath = dist < halfW;
+          float bx = x - ${f(BRANCH_X0)};
+          if ( bx > 0.0 ) {
+            float k = exp( -bx / ${f(BRANCH.a)} );
+            float bDist = abs( z - ( ${f(BRANCH.z0)} + ${f(BRANCH.a)} * ( 1.0 - k ) ) ) / sqrt( 1.0 + k * k );
+            float bHalfW = ( ${f(PATH_W.base)} + ${f(PATH_W.a1)} * sin( x * ${f(PATH_W.f1)} ) + ${f(PATH_W.a2)} * sin( x * ${f(PATH_W.f2)} + z ) )
+              * ${f(BRANCH.width)} * ( 1.0 - smoothstep( ${f(BRANCH.x1 - BRANCH.taper)}, ${f(BRANCH.x1)}, x ) );
+            onPath = onPath || bDist < bHalfW;
+          }
+          if ( onPath ) diffuseColor.rgb = ${glslColor(PATH_COLOR)} * vColor.rgb;
         }
       `);
   };
@@ -324,7 +354,7 @@ export function buildWorld(scene) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || pathEdge(x, z) < 1) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || mainPathEdge(x, z) < 1) continue;
     const tree = buildTree(rand, materials);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
@@ -337,7 +367,7 @@ export function buildWorld(scene) {
   for (let clusters = 0, attempt = 0; clusters < 12 && attempt < 500; attempt++) {
     const cx = spread();
     const cz = spread();
-    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || pathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
+    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || mainPathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
     clusters++;
     const stones = [[cx, cz, 0.6 + rand() * 0.3]];
     const small = 2 + Math.floor(rand() * 4);
@@ -347,7 +377,7 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || pathEdge(x, z) < r + 0.15) continue;
+      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || mainPathEdge(x, z) < r + 0.15) continue;
       const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
       rocks.push(rock);
