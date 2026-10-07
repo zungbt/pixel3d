@@ -69,13 +69,13 @@ const CLOUD_PARS = /* glsl */ `
   }
 `;
 
-// Low fog by absolute height, so hollows and the pond fill first while crowns and the clock
-// face stand clear; drifting patches.
+// Low fog by absolute height, thinning upward: hollows and the pond fill first, the clock face
+// and the crowns get a light haze; drifting patches.
 const FOG_PARS = /* glsl */ `
   uniform float uFogAmount;
   uniform vec3 uFogColor;
   float groundFog( vec3 worldPos ) {
-    float layer = 1.0 - smoothstep( -0.3, 3.0, worldPos.y );
+    float layer = exp( -0.5 * max( worldPos.y, 0.0 ) );
     vec2 p = worldPos.xz * 0.18 + vec2( uCloudTime * 0.04, uCloudTime * 0.015 );
     float n = valueNoise( p + 40.0 ) * 0.65 + valueNoise( p * 2.3 + 7.0 ) * 0.35;
     return uFogAmount * layer * mix( 0.45, 1.0, n ) * 0.5;
