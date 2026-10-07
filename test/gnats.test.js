@@ -2,12 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { buildScene, simulate } from './scene.js';
-import { heightAt, pondEdge } from '../src/world.js';
+import { heightAt } from '../src/world.js';
 import { DAY_LENGTH } from '../src/sky.js';
 
 const PER_SWARM = 10;
-const IN_SWARMS = 2 * PER_SWARM; // instances before the loners
-const LONERS = 12;
 const m = new THREE.Matrix4();
 const p = new THREE.Vector3();
 
@@ -28,7 +26,7 @@ for (const fps of [60, 10]) {
     const s = buildScene();
     const mesh = s.scene.getObjectByName('gnats');
     assert.ok(mesh, 'no gnats mesh');
-    assert.equal(mesh.count, IN_SWARMS + LONERS);
+    assert.equal(mesh.count, 20);
     const { swarms, obstacles, hunters } = s.insects.ctx;
     assert.equal(swarms.length, 2);
     const lastScare = swarms.map((w) => w.scaredAt);
@@ -52,10 +50,8 @@ for (const fps of [60, 10]) {
         minAlt = Math.min(minAlt, p.y - heightAt(p.x, p.z));
         if (obstacles.some((o) => o.c.distanceTo(p) < o.r - 0.01)) inside++;
       }
-      let inSwarms = 0;
-      for (let i = 0; i < IN_SWARMS; i++) if ((mesh.getMatrixAt(i, m), m.elements[0] !== 0)) inSwarms++;
-      if (inSwarms && Math.abs(s.sky.state.elevation) >= 0.5) outOfWindow++;
-      maxVisible = Math.max(maxVisible, inSwarms);
+      if (visible && Math.abs(s.sky.state.elevation) >= 0.5) outOfWindow++;
+      maxVisible = Math.max(maxVisible, visible);
       swarms.forEach((w, k) => {
         if (w.scaredAt === lastScare[k]) return;
         lastScare[k] = w.scaredAt;
@@ -102,30 +98,4 @@ test('gnats: jumping the clock to dusk finds them already in formation', () => {
     }
   }
   assert.ok(checked);
-});
-
-test('lone gnats roam the meadow by day, away from the pond, and hide at night', () => {
-  const s = buildScene();
-  const mesh = s.scene.getObjectByName('gnats');
-  const start = [];
-  let seen = 0;
-  let far = 0;
-  let atNight = 0;
-  let maxMoved = 0;
-  simulate(s, DAY_LENGTH, () => {
-    for (let i = IN_SWARMS; i < mesh.count; i++) {
-      mesh.getMatrixAt(i, m);
-      if (m.elements[0] === 0) continue;
-      p.setFromMatrixPosition(m);
-      if (s.sky.state.daylight < 0.1) atNight++;
-      seen++;
-      if (pondEdge(p.x, p.z) > 6) far++;
-      start[i] ??= p.clone();
-      maxMoved = Math.max(maxMoved, Math.hypot(p.x - start[i].x, p.z - start[i].z));
-    }
-  });
-  assert.ok(seen > 0, 'loners never seen');
-  assert.equal(atNight, 0, 'loners seen at night');
-  assert.ok(far / seen > 0.3, `only ${far}/${seen} loner frames far from the pond`);
-  assert.ok(maxMoved > 3, `loners stay put (moved at most ${maxMoved.toFixed(2)})`);
 });
