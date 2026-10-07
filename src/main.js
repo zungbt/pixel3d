@@ -4,7 +4,7 @@ import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelated
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
-import { buildSky } from './sky.js';
+import { buildSky, DAY_LENGTH } from './sky.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
 
@@ -62,6 +62,16 @@ window.addEventListener('resize', () => {
   updateFrustum();
 });
 
+// Time-of-day slider, 0-24 h (sunrise 06:00, sunset 18:00). It moves only the sky's clock;
+// wind, water and wings keep real time. Always jumps forward, so the sky's time never goes negative.
+const timeInput = document.querySelector('#time input');
+const timeLabel = document.querySelector('#time span');
+let skyOffset = 0;
+timeInput.addEventListener('input', () => {
+  const phase = (timeInput.valueAsNumber - 6) / 24;
+  skyOffset += ((((phase - sky.state.phase) % 1) + 1) % 1) * DAY_LENGTH;
+});
+
 let lastT;
 renderer.setAnimationLoop((ms) => {
   const t = ms / 1000;
@@ -69,7 +79,10 @@ renderer.setAnimationLoop((ms) => {
   lastT = t;
   world.update(t);
   grass.update(t);
-  sky.update(t);
+  sky.update(t + skyOffset);
   insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
+  const hour = (sky.state.phase * 24 + 6) % 24;
+  timeInput.value = hour;
+  timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
   composer.render();
 });
