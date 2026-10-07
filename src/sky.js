@@ -88,10 +88,15 @@ export function buildSky(scene) {
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
 
+  // Read by the insects each frame; phase 0 -> 0.5 is day, 0.5 is sunset.
+  const state = { phase: 0, elevation: 0, daylight: 0 };
+
   return {
+    state,
     update(t) {
       cloudUniforms.uCloudTime.value = t;
 
+      state.phase = (t / DAY_LENGTH + DAY_START) % 1;
       const angle = (t / DAY_LENGTH + DAY_START) * Math.PI * 2;
       const elevation = Math.sin(angle); // >0 day, <0 night
       const isDay = elevation >= 0;
@@ -109,6 +114,8 @@ export function buildSky(scene) {
       }
 
       const daylight = THREE.MathUtils.smoothstep(elevation, -0.1, 0.25);
+      state.elevation = elevation;
+      state.daylight = daylight;
       const dusk = 1 - THREE.MathUtils.smoothstep(Math.abs(elevation), 0, 0.35);
       hemi.color.lerpColors(HEMI_NIGHT, HEMI_DAY, daylight);
       hemi.intensity = THREE.MathUtils.lerp(0.2, 1.2, daylight);

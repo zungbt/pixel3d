@@ -5,6 +5,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
 import { buildSky } from './sky.js';
+import { buildInsects } from './insects.js';
 
 const VIEW_HEIGHT = 18; // world units visible vertically
 const PIXEL_SIZE = 4; // screen px per art pixel (no setPixelRatio, so CSS px)
@@ -18,6 +19,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
 const world = buildWorld(scene);
 const grass = buildGrass(scene, world);
+const insects = buildInsects(scene, world);
 const sky = buildSky(scene); // last: patches cloud shadows into every toon material above
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
@@ -58,10 +60,14 @@ window.addEventListener('resize', () => {
   updateFrustum();
 });
 
+let lastT;
 renderer.setAnimationLoop((ms) => {
   const t = ms / 1000;
+  const dt = lastT === undefined ? 0 : Math.min(t - lastT, 0.1); // no jumps after a hidden tab
+  lastT = t;
   world.update(t);
   grass.update(t);
   sky.update(t);
+  insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
   composer.render();
 });

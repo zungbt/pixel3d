@@ -217,6 +217,7 @@ function buildTree(rand, materials) {
 
   const canopy = 0.6 + rand() * 0.3;
   tree.userData.canopy = canopy;
+  tree.userData.crown = height + 0.3; // crown centre above the base
   const leaves = new THREE.Mesh(LEAVES_GEO, materials.leaves);
   leaves.scale.setScalar(canopy);
   leaves.position.y = height + 0.3;
