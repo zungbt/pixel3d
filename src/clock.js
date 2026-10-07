@@ -68,6 +68,9 @@ export function buildClock(scene, world) {
     part.receiveShadow = true;
     clock.add(part);
   }
+  // At noon the sun grazes the upright face, and the shadow map is too coarse to tell the dial
+  // from the rim just behind it: a diagonal half of the face came out shaded.
+  dial.receiveShadow = false;
   scene.add(clock);
 
   return {
