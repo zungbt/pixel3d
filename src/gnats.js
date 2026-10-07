@@ -2,10 +2,10 @@ import * as THREE from 'three';
 import { heightAt, mulberry32, pondPoint } from './world.js';
 import { ease, pick, rngFor, turn } from './motion.js';
 
-const SWARMS = 3;
-const PER_SWARM = 20;
+const SWARMS = 2;
+const PER_SWARM = 10;
 const SIZE = 0.067; // one art pixel
-const COLOR = 0x23241c;
+const COLOR = new THREE.Color(0x4a4c3c); // in full light; dimmed with the sky so the specks don't glow at dusk
 const RIM = 0.25; // swarm markers sit just off the shoreline
 const COLUMN_Y = 1.3; // column centre above the ground
 const COLUMN_R = 0.45; // horizontal radius of the column
@@ -70,12 +70,12 @@ export function buildGnats(scene, ctx) {
     }
   });
 
-  // Transparent-free, unlit dark specks. Being instanced they also get the grass wind in the
-  // pixel pass's normal render; for a box this small the offset is ~0.01 units, well under an
-  // art pixel, so it is left alone.
+  // Transparent-free, unlit specks, darkened in update as the light fades. Being instanced they
+  // also get the grass wind in the pixel pass's normal render; for a box this small the offset is
+  // ~0.01 units, well under an art pixel, so it is left alone.
   const mesh = new THREE.InstancedMesh(
     new THREE.BoxGeometry(SIZE, SIZE, SIZE),
-    new THREE.MeshBasicMaterial({ color: COLOR }),
+    new THREE.MeshBasicMaterial(),
     gnats.length,
   );
   mesh.name = 'gnats';
@@ -129,6 +129,8 @@ export function buildGnats(scene, ctx) {
   return {
     update(t, dt, sky) {
       const act = 1 - THREE.MathUtils.smoothstep(Math.abs(sky.elevation), 0.4, 0.5);
+      // Unlit, so follow the hemisphere light's intensity curve (sky.js) to stay as dark as the scene.
+      mesh.material.color.copy(COLOR).multiplyScalar(THREE.MathUtils.lerp(0.2, 1.2, sky.daylight) / 1.2);
       for (const swarm of swarms) {
         // The column drifts slowly about its marker and bobs.
         const drift = (f) =>
