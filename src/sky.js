@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { NOISE_GLSL } from './world.js';
 
-export const DAY_LENGTH = 120; // seconds for a full day-night cycle
+export const DAY_LENGTH = 300; // seconds for a full day-night cycle
 const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
 
 const SUN_DAY = new THREE.Color(0xfff1d6);
