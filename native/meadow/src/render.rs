@@ -5,6 +5,12 @@ use std::fmt::Write;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
+use meadow_core::butterflies::{self, Butterflies};
+use meadow_core::dragonflies::{self, Dragonflies};
+use meadow_core::fireflies::{self, Fireflies};
+use meadow_core::gnats::{self, Gnats};
+use meadow_core::flowers::{self, HEAD_R, HEAD_Y};
+use meadow_core::flight::V3;
 use meadow_core::sky::{self, SkyState};
 use meadow_core::world;
 use wgpu::util::DeviceExt;
@@ -74,6 +80,11 @@ impl Instance {
     fn swaying(model: Mat4, color: u32, tree: &world::Tree) -> Self {
         Self { base: [tree.x as f32, tree.y as f32, tree.z as f32, tree.phase as f32], ..Self::new(model, color) }
     }
+
+    /// In the grass's wind (IN_WIND in scene.wgsl); `color` already linear.
+    fn in_wind(model: Mat4, color: Vec3) -> Self {
+        Self { model: model.to_cols_array_2d(), base: [0.0, 0.0, 0.0, -2.0], color: color.extend(1.0).into() }
+    }
 }
 
 #[repr(C)]
@@ -89,6 +100,8 @@ enum Shade {
     Toon,
     Ground,
     Water,
+    Insect,
+    Unlit,
 }
 
 struct Draw {
@@ -120,6 +133,7 @@ pub struct Renderer {
     toon_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    insect_pipeline: wgpu::RenderPipeline,
     grass_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
@@ -127,6 +141,18 @@ pub struct Renderer {
     manual_srgb: bool,
     draws: Vec<Draw>,
     grass: Grass,
+    butterflies: Butterflies,
+    butterfly_body: Draw,  // 12 instances, rewritten every frame
+    butterfly_wings: Draw, // 24: left and right of each
+    dragonflies: Dragonflies,
+    dragonfly_body: Draw,
+    dragonfly_wings: Draw, // front and hind, left and right: 4 each
+    gnats: Gnats,
+    gnat_draw: Draw,
+    fireflies: Fireflies,
+    firefly_draw: Draw, // after everything opaque, with no depth or normal writes
+    glow_pipeline: wgpu::RenderPipeline,
+    unlit_pipeline: wgpu::RenderPipeline,
     targets: Targets,
     pixel_size: u32,
 }
@@ -227,19 +253,34 @@ fn scene_pipeline(
     buffers: &[Option<wgpu::VertexBufferLayout>],
     cull_mode: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
-    let target = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
+    overlay_pipeline(device, layout, module, (vs, fs), buffers, cull_mode, false)
+}
+
+/// `overlay`: colour only, no depth or normal writes (the web's transparent, depthWrite-false
+/// materials), so the outline pass never sees it.
+fn overlay_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    (vs, fs): (&str, &str),
+    buffers: &[Option<wgpu::VertexBufferLayout>],
+    cull_mode: Option<wgpu::Face>,
+    overlay: bool,
+) -> wgpu::RenderPipeline {
+    let target = |format, write_mask| Some(wgpu::ColorTargetState { format, blend: None, write_mask });
+    let normal_mask = if overlay { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(fs),
         layout: Some(layout),
         vertex: wgpu::VertexState { module, entry_point: Some(vs), compilation_options: Default::default(), buffers },
         primitive: wgpu::PrimitiveState { cull_mode, ..Default::default() },
-        depth_stencil: Some(depth_state(DEPTH_FORMAT)),
+        depth_stencil: Some(wgpu::DepthStencilState { depth_write_enabled: Some(!overlay), ..depth_state(DEPTH_FORMAT) }),
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some(fs),
             compilation_options: Default::default(),
-            targets: &[target(COLOR_FORMAT), target(NORMAL_FORMAT)],
+            targets: &[target(COLOR_FORMAT, wgpu::ColorWrites::ALL), target(NORMAL_FORMAT, normal_mask)],
         }),
         multiview_mask: None,
         cache: None,
@@ -252,7 +293,7 @@ fn upload(device: &wgpu::Device, mesh: MeshData, instances: &[Instance], shade: 
         vertices: init("vertices", bytemuck::cast_slice(&mesh.vertices), wgpu::BufferUsages::VERTEX),
         indices: init("indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
         index_count: mesh.indices.len() as u32,
-        instances: init("instances", bytemuck::cast_slice(instances), wgpu::BufferUsages::VERTEX),
+        instances: init("instances", bytemuck::cast_slice(instances), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST),
         instance_count: instances.len() as u32,
         shade,
         casts_shadow,
@@ -260,8 +301,8 @@ fn upload(device: &wgpu::Device, mesh: MeshData, instances: &[Instance], shade: 
 }
 
 // Every mesh in the meadow, as instanced draws.
-fn build_draws(device: &wgpu::Device, layout: &world::Layout) -> Vec<Draw> {
-    log::info!("layout: {} trees, {} rocks", layout.trees.len(), layout.rocks.len());
+fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers::Head]) -> Vec<Draw> {
+    log::info!("layout: {} trees, {} rocks, {} flowers", layout.trees.len(), layout.rocks.len(), flowers.len());
     let pond = |lift: f64| Mat4::from_translation(Vec3::new(world::POND_X as f32, (world::shore_y() + lift) as f32, world::POND_Z as f32));
     let at = |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
     let trunks: Vec<_> = layout
@@ -285,6 +326,12 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout) -> Vec<Draw> {
             Instance::new(m, ROCK)
         })
         .collect();
+    // Heads in the wind, so the mesh sits HEAD_Y up in its own space (the sway grows with local y).
+    let mut head = mesh::octahedron();
+    for v in &mut head.vertices {
+        v.pos = (Vec3::from(v.pos) * HEAD_R as f32 + Vec3::Y * HEAD_Y as f32).into();
+    }
+    let heads: Vec<_> = flowers.iter().map(|h| Instance::in_wind(at(h.x, h.y - HEAD_Y, h.z), linear(h.color) * h.shade as f32)).collect();
     vec![
         upload(device, mesh::ground(), &[Instance::new(Mat4::IDENTITY, GROUND)], Shade::Ground, false),
         upload(device, mesh::fan(world::sand_radius), &[Instance::new(pond(0.01), SAND)], Shade::Toon, false),
@@ -292,6 +339,7 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout) -> Vec<Draw> {
         upload(device, mesh::trunk(), &trunks, Shade::Toon, true),
         upload(device, mesh::icosahedron(), &crowns, Shade::Toon, true),
         upload(device, mesh::dodecahedron(), &rocks, Shade::Toon, true),
+        upload(device, head, &heads, Shade::Toon, false),
     ]
 }
 
@@ -382,6 +430,9 @@ impl Renderer {
         let toon_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_toon"), &BUFFERS, Some(wgpu::Face::Back));
         let ground_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_ground"), &BUFFERS, Some(wgpu::Face::Back));
         let water_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_water"), &BUFFERS, Some(wgpu::Face::Back));
+        let insect_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_insect"), &BUFFERS, None);
+        let unlit_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_unlit"), &BUFFERS, Some(wgpu::Face::Back));
+        let glow_pipeline = overlay_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_unlit"), &BUFFERS, Some(wgpu::Face::Back), true);
         // No culling: a blade faces the camera, and the wind keeps its tip in that plane.
         let grass_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_grass", "fs_grass"), &grass::BUFFERS, None);
         let post_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -417,6 +468,12 @@ impl Renderer {
         };
         // Placed once: the trees and rocks also thin the grass.
         let world_layout = world::place(42);
+        let flowers = flowers::place_flowers(&world_layout);
+        let butterflies = Butterflies::new(&world_layout, &flowers);
+        let (dragonflies, gnats, fireflies) = (Dragonflies::new(&world_layout), Gnats::new(&world_layout), Fireflies::new(&world_layout));
+        let n_dragonflies = dragonflies.poses().len();
+        let n_gnats = gnats.poses().len();
+        let blank = |n| vec![Instance::new(Mat4::IDENTITY, 0); n]; // posed before the first draw
         let targets = Self::targets(device, &post_layout, &post_buf, art_size(width, height, pixel_size));
         let mut renderer = Self {
             globals,
@@ -429,13 +486,26 @@ impl Renderer {
             toon_pipeline,
             ground_pipeline,
             water_pipeline,
+            insect_pipeline,
             grass_pipeline,
             post_pipeline,
             post_layout,
             post_buf,
             manual_srgb: !surface_format.is_srgb(),
-            draws: build_draws(device, &world_layout),
+            draws: build_draws(device, &world_layout, &flowers),
             grass: Grass::new(device, &world_layout),
+            butterfly_body: upload(device, mesh::cube(), &blank(butterflies::COUNT), Shade::Insect, false),
+            butterfly_wings: upload(device, mesh::wing(), &blank(butterflies::COUNT * 2), Shade::Insect, false),
+            butterflies,
+            dragonfly_body: upload(device, mesh::cube(), &blank(n_dragonflies), Shade::Insect, false),
+            dragonfly_wings: upload(device, mesh::wing(), &blank(n_dragonflies * 4), Shade::Insect, false),
+            dragonflies,
+            gnat_draw: upload(device, mesh::cube(), &blank(n_gnats), Shade::Unlit, false),
+            gnats,
+            firefly_draw: upload(device, mesh::cube(), &blank(fireflies::COUNT), Shade::Unlit, false),
+            fireflies,
+            glow_pipeline,
+            unlit_pipeline,
             targets,
             pixel_size,
         };
@@ -488,9 +558,63 @@ impl Renderer {
         log::info!("art {}x{} at pixel size {}, {} grass blades drawn", art.0, art.1, self.pixel_size, self.grass.count);
     }
 
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f32, sky: &SkyState) {
+    /// Every insect one step on (in the web's species order) and at its pose for this frame.
+    fn pose_insects(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, sky: &SkyState) {
+        self.butterflies.update(time, dt, sky.daylight);
+        self.dragonflies.update(dt, sky.daylight, self.gnats.swarms());
+        self.fireflies.update(time, dt, sky.phase);
+        self.gnats.update(time, dt, sky.elevation, self.dragonflies.darting());
+
+        let at = |p: V3| Mat4::from_translation(Vec3::new(p.x as f32, p.y as f32, p.z as f32));
+        let wing_scale = Mat4::from_scale(Vec3::new(butterflies::WING_W as f32, 1.0, butterflies::WING_L as f32));
+        let (mut body, mut wings) = (Vec::with_capacity(butterflies::COUNT), Vec::with_capacity(butterflies::COUNT * 2));
+        for p in self.butterflies.poses() {
+            let frame = at(p.pos) * Mat4::from_rotation_y(p.yaw as f32);
+            let wing = p.wing as f32;
+            body.push(Instance::new(frame * Mat4::from_scale(Vec3::new(0.03, 0.03, 0.12)), butterflies::BODY));
+            wings.push(Instance::new(frame * Mat4::from_rotation_z(wing) * wing_scale, p.color));
+            // The left wing: the right one turned half round (it's symmetric in z), raised the other way.
+            wings.push(Instance::new(frame * Mat4::from_rotation_z(-wing) * Mat4::from_rotation_y(std::f32::consts::PI) * wing_scale, p.color));
+        }
+        queue.write_buffer(&self.butterfly_body.instances, 0, bytemuck::cast_slice(&body));
+        queue.write_buffer(&self.butterfly_wings.instances, 0, bytemuck::cast_slice(&wings));
+
+        let body_scale = Mat4::from_translation(Vec3::new(0.0, 0.0, -0.05)) * Mat4::from_scale(Vec3::new(0.04, 0.04, dragonflies::BODY_L as f32));
+        let wing_scale = Mat4::from_scale(Vec3::new(dragonflies::WING_L as f32, 1.0, dragonflies::WING_W as f32));
+        let (mut body, mut wings) = (Vec::new(), Vec::new());
+        for p in self.dragonflies.poses() {
+            let frame = at(p.pos) * Mat4::from_rotation_y(p.yaw as f32);
+            let wing = p.wing as f32;
+            body.push(Instance::new(frame * body_scale, p.color));
+            for z in dragonflies::WING_Z {
+                let along = Mat4::from_translation(Vec3::new(0.0, 0.0, z as f32));
+                wings.push(Instance::new(frame * Mat4::from_rotation_z(wing) * along * wing_scale, dragonflies::WING_COLOR));
+                wings.push(Instance::new(frame * Mat4::from_rotation_z(-wing) * along * Mat4::from_rotation_y(std::f32::consts::PI) * wing_scale, dragonflies::WING_COLOR));
+            }
+        }
+        queue.write_buffer(&self.dragonfly_body.instances, 0, bytemuck::cast_slice(&body));
+        queue.write_buffer(&self.dragonfly_wings.instances, 0, bytemuck::cast_slice(&wings));
+
+        // Unlit, so dimmed along the hemisphere light's curve (as the web) to stay as dark as the scene.
+        let speck = |p: Option<V3>, size: f64, color: Vec3| {
+            let model = p.map_or(Mat4::ZERO, |p| at(p) * Mat4::from_scale(Vec3::splat(size as f32)));
+            Instance { color: color.extend(1.0).into(), ..Instance::new(model, 0) }
+        };
+        let dim = linear(gnats::COLOR) * (world::lerp(0.2, 1.2, sky.daylight) / 1.2) as f32;
+        let specks: Vec<_> = self.gnats.poses().iter().map(|&p| speck(p, gnats::SIZE, dim)).collect();
+        queue.write_buffer(&self.gnat_draw.instances, 0, bytemuck::cast_slice(&specks));
+        // Hidden between flashes, since a dark firefly is invisible against the night.
+        let glow = linear(fireflies::GLOW);
+        let specks: Vec<_> =
+            self.fireflies.poses().iter().map(|p| speck((p.glow > 0.1).then_some(p.pos), fireflies::SIZE, glow * p.glow as f32)).collect();
+        queue.write_buffer(&self.firefly_draw.instances, 0, bytemuck::cast_slice(&specks));
+    }
+
+    /// One frame at animation time `time` (s), `dt` after the last drawn one.
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f64, dt: f64, sky: &SkyState) {
         self.set_sky(sky);
-        self.globals.params[0] = time;
+        self.pose_insects(queue, time, dt, sky);
+        self.globals.params[0] = time as f32;
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         let mut encoder = device.create_command_encoder(&Default::default());
         let depth_attachment = |view| {
@@ -549,17 +673,22 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_group, &[]);
             pass.set_bind_group(1, &self.shadow_group, &[]);
-            for d in &self.draws {
+            let insects = [&self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
+            for d in self.draws.iter().chain(insects) {
                 pass.set_pipeline(match d.shade {
                     Shade::Toon => &self.toon_pipeline,
                     Shade::Ground => &self.ground_pipeline,
                     Shade::Water => &self.water_pipeline,
+                    Shade::Insect => &self.insect_pipeline,
+                    Shade::Unlit => &self.unlit_pipeline,
                 });
                 draw(&mut pass, d);
             }
             pass.set_pipeline(&self.grass_pipeline);
             pass.set_vertex_buffer(0, self.grass.instances.slice(..));
             pass.draw(0..3, 0..self.grass.count);
+            pass.set_pipeline(&self.glow_pipeline);
+            draw(&mut pass, &self.firefly_draw);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

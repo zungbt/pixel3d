@@ -1,4 +1,5 @@
-//! Hand-built meshes: the ground, unit-sized rock / trunk / crown shapes, and the pond and beach fans.
+//! Hand-built meshes: the ground, unit-sized rock / trunk / crown / flower shapes, the butterfly's
+//! body and wing, and the pond and beach fans.
 use std::f64::consts::PI;
 
 use bytemuck::{Pod, Zeroable};
@@ -107,6 +108,46 @@ pub fn icosahedron() -> MeshData {
     polyhedron(&raw, &tris)
 }
 
+/// Unit flower head (three's OctahedronGeometry(1, 0)).
+pub fn octahedron() -> MeshData {
+    #[rustfmt::skip]
+    let raw = [1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0, -1.0];
+    let tris = [0, 2, 4, 0, 4, 3, 0, 3, 5, 0, 5, 2, 1, 2, 5, 1, 5, 3, 1, 3, 4, 1, 4, 2];
+    polyhedron(&raw, &tris)
+}
+
+/// Unit cube about the origin (three's BoxGeometry(1, 1, 1)): flat faces.
+pub fn cube() -> MeshData {
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for axis in 0..3 {
+        for sign in [1.0_f32, -1.0] {
+            let mut n = Vec3::ZERO;
+            n[axis] = sign;
+            // Two tangents with u × v = n, so the corners below wind counter-clockwise from outside.
+            let u = Vec3::from_slice(&[[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]][axis]) * sign;
+            let v = n.cross(u);
+            let first = vertices.len() as u32;
+            for (a, b) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                vertices.push(Vertex { pos: (n * 0.5 + u * a + v * b).into(), normal: n.into(), extra: 0.0 });
+            }
+            indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+        }
+    }
+    MeshData { vertices, indices }
+}
+
+/// An insect's right wing at unit size: flat, facing up, hinged on the z axis and reaching out
+/// along +x (three's PlaneGeometry turned flat and shifted half its width).
+pub fn wing() -> MeshData {
+    let up = [0.0, 1.0, 0.0];
+    let vertices = [[0.0, -0.5], [1.0, -0.5], [1.0, 0.5], [0.0, 0.5]]
+        .map(|[x, z]| Vertex { pos: [x, 0.0, z], normal: up, extra: 0.0 })
+        .to_vec();
+    // Counter-clockwise seen from above.
+    MeshData { vertices, indices: vec![0, 3, 2, 0, 2, 1] }
+}
+
 /// Unit-height trunk (three's CylinderGeometry(0.12, 0.16, 1, 6)): smooth sides, flat caps.
 pub fn trunk() -> MeshData {
     const SEGMENTS: u32 = 6;
@@ -171,7 +212,7 @@ mod tests {
 
     #[test]
     fn closed_solids_wind_outward() {
-        for m in [dodecahedron(), icosahedron(), trunk()] {
+        for m in [dodecahedron(), icosahedron(), octahedron(), cube(), trunk()] {
             for (n, centre) in tri_normals(&m) {
                 assert!(n.dot(centre) > 0.0, "inward triangle at {centre}");
             }
@@ -180,7 +221,7 @@ mod tests {
 
     #[test]
     fn flat_meshes_face_up() {
-        for m in [ground(), fan(world::pond_radius), fan(world::sand_radius)] {
+        for m in [ground(), fan(world::pond_radius), fan(world::sand_radius), wing()] {
             assert!(tri_normals(&m).all(|(n, _)| n.y > 0.0));
             assert!(m.vertices.iter().all(|v| v.normal[1] > 0.0));
         }

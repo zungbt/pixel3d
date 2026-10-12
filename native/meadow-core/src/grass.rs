@@ -7,6 +7,7 @@ use libm::{ceil, floor, hypot, pow, sqrt};
 use crate::rng::Mulberry32;
 use crate::world::{GROUND_CELL, GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
 
+pub const BLADE_H: f64 = 0.3; // also the wind's height scale for the flowers and the perched insects
 pub const ATTEMPTS: u32 = 240_000; // the web's ~59 per square unit, over the whole ground
 const HALF: f64 = GROUND_SIZE / 2.0 - 0.1; // just inside the ground
 const SEED: u32 = 99;

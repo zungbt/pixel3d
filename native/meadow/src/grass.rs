@@ -12,7 +12,7 @@ use crate::camera;
 
 // Filled into the shader by render.rs.
 pub const BLADE_W: f64 = 0.1;
-pub const BLADE_H: f64 = 0.3;
+pub use meadow_core::grass::BLADE_H;
 const VIEW_MARGIN: f32 = 0.6; // world units kept past the screen edges: blade height, width and sway
 
 #[repr(C)]
