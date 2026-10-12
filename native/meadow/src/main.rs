@@ -1,5 +1,5 @@
 // The meadow at noon: ground, paths, pond, trees and rocks, toon-lit with pixel outlines.
-// Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 2),
+// Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 3),
 // --wallpaper (Windows: behind the desktop icons, with a tray menu).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
@@ -285,7 +285,7 @@ fn main() {
         Some(v) => Some(parse_fps(v).unwrap_or_else(|| panic!("--fps must be 0, 60, 30, 20 or 15, got {v}"))),
     };
     let pixel_size = match arg(&args, "--pixel-size").as_deref() {
-        None => 2,
+        None => 3,
         Some(v) => v.parse().ok().filter(|n| (2..=4).contains(n)).unwrap_or_else(|| panic!("--pixel-size must be 2, 3 or 4, got {v}")),
     };
     log::info!("fps cap: {}, pixel size {pixel_size}", fps.map_or("none (vsync)".into(), |f| f.to_string()));
