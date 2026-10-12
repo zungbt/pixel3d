@@ -1,0 +1,8 @@
+[package]
+name = "meadow-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Pure-Rust maths: the Linux test host (glibc) and the Windows exe (mingw CRT) get the same layout.
+libm = "0.2"
