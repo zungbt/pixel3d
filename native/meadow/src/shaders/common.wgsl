@@ -10,6 +10,7 @@ struct Globals {
     hemi_ground: vec4f, // rgb × intensity
     water_tint: vec4f,  // white with a hint of the sky
     params: vec4f,      // x: time (s)
+    fog: vec4f,         // rgb: ground fog colour, a: amount (0: none)
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -75,4 +76,22 @@ fn value_noise(p: vec2f) -> f32 {
         mix(noise_hash(i + vec2f(0.0, 1.0)), noise_hash(i + vec2f(1.0, 1.0)), u.x),
         u.y,
     );
+}
+
+// Hard-edged value-noise blobs drifting with the wind (the web's sky.js); they only dim direct light.
+fn cloud_shade(world: vec3f) -> f32 {
+    let t = g.params.x;
+    let p = world.xz * 0.15 + vec2f(t * 0.05, t * 0.02);
+    let n = value_noise(p) * 0.65 + value_noise(p * 2.3) * 0.35;
+    return mix(1.0, 0.35, smoothstep(0.58, 0.6, n));
+}
+
+// Low fog by absolute height, thinning upward: hollows and the pond fill first, the crowns get a
+// light haze; drifting patches.
+fn ground_fog(world: vec3f) -> f32 {
+    let t = g.params.x;
+    let layer = exp(-0.5 * max(world.y, 0.0));
+    let p = world.xz * 0.18 + vec2f(t * 0.04, t * 0.015);
+    let n = value_noise(p + 40.0) * 0.65 + value_noise(p * 2.3 + 7.0) * 0.35;
+    return g.fog.a * layer * mix(0.45, 1.0, n) * 0.5;
 }

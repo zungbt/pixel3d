@@ -67,7 +67,8 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
         let time = (self.time + dt) as f32;
-        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time)) {
+        let sky = meadow_core::sky::sky_state(meadow_core::sky::NOON, 0.0); // the clock arrives in the next commit
+        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, &sky)) {
             Frame::Occluded => {
                 if self.retry_at.is_none() {
                     log::info!("occluded: pausing");

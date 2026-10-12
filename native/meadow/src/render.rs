@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
+use meadow_core::sky::{self, SkyState};
 use meadow_core::world;
 use wgpu::util::DeviceExt;
 
@@ -17,10 +18,8 @@ const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
 
-// Web palette (sRGB hex), noon lights as the web's sky.js.
-const BACKGROUND: u32 = 0x7fb2e5;
-const SUN: (u32, f32) = (0xfff1d6, 2.5);
-const HEMI_SKY: (u32, f32) = (0xbbe4f4, 1.2);
+// Web palette (sRGB hex). The time-of-day lights come from meadow_core::sky each frame; the ground
+// half of the hemisphere light stays fixed, as the web's.
 const HEMI_GROUND: (u32, f32) = (0x3a3326, 1.2);
 const GROUND: u32 = 0xa4cc86;
 const SAND: u32 = 0xecd8b8;
@@ -37,11 +36,11 @@ const SHADER_COLORS: [(&str, u32); 6] = [
 ];
 
 fn linear(hex: u32) -> Vec3 {
-    let c = |shift: u32| {
-        let s = ((hex >> shift) & 0xff) as f32 / 255.0;
-        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
-    };
-    Vec3::new(c(16), c(8), c(0))
+    vec3(sky::linear(hex))
+}
+
+fn vec3(c: sky::Rgb) -> Vec3 {
+    Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32)
 }
 
 #[repr(C)]
@@ -56,6 +55,7 @@ struct Globals {
     hemi_ground: [f32; 4],
     water_tint: [f32; 4],
     params: [f32; 4],
+    fog: [f32; 4], // rgb: ground fog colour, a: amount
 }
 
 #[repr(C)]
@@ -113,6 +113,7 @@ pub struct Renderer {
     globals: Globals,
     globals_buf: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
+    background: Vec3, // this frame's sky: the scene pass's clear colour
     shadow_view: wgpu::TextureView,
     shadow_group: wgpu::BindGroup,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -406,18 +407,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let (sun, sky, ground) = (linear(SUN.0) * SUN.1, linear(HEMI_SKY.0) * HEMI_SKY.1, linear(HEMI_GROUND.0) * HEMI_GROUND.1);
+        let ground = linear(HEMI_GROUND.0) * HEMI_GROUND.1;
+        // The time-of-day fields are set by set_sky, before every upload.
         let globals = Globals {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(), // set by resize
             view: camera::view().to_cols_array_2d(),
-            light_view_proj: camera::light_view_proj().to_cols_array_2d(),
-            sun_dir: camera::SUN_POS.normalize().extend(0.0).into(),
-            sun_color: sun.extend(0.0).into(),
-            hemi_sky: sky.extend(0.0).into(),
             hemi_ground: ground.extend(0.0).into(),
-            // White lerped 10% toward the background, as the web's water material.
-            water_tint: Vec3::ONE.lerp(linear(BACKGROUND), 0.1).extend(0.0).into(),
-            params: [0.0; 4],
+            ..Zeroable::zeroed()
         };
         // Placed once: the trees and rocks also thin the grass.
         let world_layout = world::place(42);
@@ -426,6 +422,7 @@ impl Renderer {
             globals,
             globals_buf,
             globals_group,
+            background: Vec3::ZERO,
             shadow_view,
             shadow_group,
             shadow_pipeline,
@@ -468,6 +465,19 @@ impl Renderer {
         self.grass.set_view((w, h));
     }
 
+    /// This frame's time of day: lights, shadow camera, water tint, ground fog and the sky colour.
+    fn set_sky(&mut self, sky: &SkyState) {
+        let sun = vec3(sky.sun_pos);
+        self.globals.sun_dir = sun.normalize().extend(0.0).into();
+        self.globals.light_view_proj = camera::light_view_proj(sun).to_cols_array_2d();
+        self.globals.sun_color = vec3(sky.sun_color).extend(0.0).into();
+        self.globals.hemi_sky = vec3(sky.hemi_sky).extend(0.0).into();
+        self.background = vec3(sky.background);
+        // White lerped 10% toward the sky, as the web's water material.
+        self.globals.water_tint = Vec3::ONE.lerp(self.background, 0.1).extend(0.0).into();
+        self.globals.fog = vec3(sky.fog_color).extend(sky.fog as f32).into();
+    }
+
     /// New window size (never 0): rebuilds the art targets, the post bind group and the camera together.
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         let art = art_size(width, height, self.pixel_size);
@@ -478,7 +488,8 @@ impl Renderer {
         log::info!("art {}x{} at pixel size {}, {} grass blades drawn", art.0, art.1, self.pixel_size, self.grass.count);
     }
 
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f32) {
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f32, sky: &SkyState) {
+        self.set_sky(sky);
         self.globals.params[0] = time;
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -528,7 +539,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[
-                    color_attachment(&self.targets.color, linear(BACKGROUND).extend(1.0)),
+                    color_attachment(&self.targets.color, self.background.extend(1.0)),
                     color_attachment(&self.targets.normal, up.extend(1.0)),
                 ],
                 depth_stencil_attachment: depth_attachment(&self.targets.depth),
@@ -597,5 +608,21 @@ mod tests {
     fn linear_matches_srgb_decode() {
         assert!((linear(0xffffff) - Vec3::ONE).length() < 1e-6);
         assert!((linear(0x808080).x - 0.2158605).abs() < 1e-5);
+    }
+
+    #[test]
+    fn globals_match_the_wgsl_struct() {
+        let src = include_str!("shaders/common.wgsl");
+        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        let span = module
+            .types
+            .iter()
+            .find_map(|(_, t)| match t.inner {
+                naga::TypeInner::Struct { span, .. } if t.name.as_deref() == Some("Globals") => Some(span),
+                _ => None,
+            })
+            .expect("Globals in common.wgsl");
+        assert_eq!(span as usize, size_of::<Globals>());
+        assert_eq!(size_of::<Globals>(), 304, "three mat4 and seven vec4");
     }
 }
