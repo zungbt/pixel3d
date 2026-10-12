@@ -30,7 +30,11 @@ struct Now {
 }
 
 fn now(tz: &TimeZone) -> Now {
-    let z = Timestamp::now().to_zoned(tz.clone());
+    at(tz, Timestamp::now())
+}
+
+fn at(tz: &TimeZone, t: Timestamp) -> Now {
+    let z = t.to_zoned(tz.clone());
     let seconds = z.second() as f64 + z.subsec_nanosecond() as f64 * 1e-9;
     Now {
         date: Date { year: z.year() as i32, month: z.month() as u8, day: z.day() as u8 },
@@ -149,9 +153,10 @@ impl SkyClock {
         }
     }
 
-    /// The post clock's (hour, minute) hands: always the local time, whatever the sky shows.
-    pub fn hands(&self) -> (f64, f64) {
-        let (h, m, s) = now(&self.tz).hms;
+    /// The post clock's (hour, minute) hands: always the local time, whatever the sky shows, less
+    /// `behind` s (stopped, or still catching up).
+    pub fn hands(&self, behind: f64) -> (f64, f64) {
+        let (h, m, s) = at(&self.tz, Timestamp::now() - jiff::SignedDuration::from_secs_f64(behind)).hms;
         clock::hand_angles(h, m, s)
     }
 

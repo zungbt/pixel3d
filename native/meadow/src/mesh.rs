@@ -1,5 +1,5 @@
 //! Hand-built meshes: the ground, unit-sized rock / trunk / crown / flower shapes, the butterfly's
-//! body and wing, the pond and beach fans, and the post clock's cylinders.
+//! body and wing, the pond and beach fans, and the post clock's cylinders and ring wedges.
 use std::f64::consts::PI;
 
 use bytemuck::{Pod, Zeroable};
@@ -202,6 +202,55 @@ pub fn fan(radius: fn(f64) -> f64) -> MeshData {
     MeshData { vertices, indices }
 }
 
+/// Flat ring wedge facing up, as `fan`: from angle 0 to `angle` (radians, +x toward +z) and
+/// radius `r0` to `r1`.
+pub fn sector(r0: f32, r1: f32, angle: f32, segments: u32) -> MeshData {
+    let mut m = MeshData { vertices: Vec::new(), indices: Vec::new() };
+    let up = Vec3::Y;
+    for s in 0..segments {
+        let (a, b) = (s as f32 / segments as f32 * angle, (s + 1) as f32 / segments as f32 * angle);
+        quad(&mut m, [ring(r0, a, 0.0), ring(r1, a, 0.0), ring(r1, b, 0.0), ring(r0, b, 0.0)], [up; 4]);
+    }
+    m
+}
+
+/// The same wedge as a solid of unit height about the origin: a piece of a thick ring, with
+/// smooth curved walls.
+pub fn sector_prism(r0: f32, r1: f32, angle: f32, segments: u32) -> MeshData {
+    let mut m = MeshData { vertices: Vec::new(), indices: Vec::new() };
+    let radial = |t: f32| Vec3::new(t.cos(), 0.0, t.sin());
+    let tangent = |t: f32| Vec3::new(-t.sin(), 0.0, t.cos()); // toward a larger angle
+    for s in 0..segments {
+        let (a, b) = (s as f32 / segments as f32 * angle, (s + 1) as f32 / segments as f32 * angle);
+        for (y, n) in [(0.5, Vec3::Y), (-0.5, Vec3::NEG_Y)] {
+            quad(&mut m, [ring(r0, a, y), ring(r1, a, y), ring(r1, b, y), ring(r0, b, y)], [n; 4]);
+        }
+        quad(&mut m, [ring(r1, a, -0.5), ring(r1, b, -0.5), ring(r1, b, 0.5), ring(r1, a, 0.5)], [radial(a), radial(b), radial(b), radial(a)]);
+        if r0 > 0.0 {
+            quad(&mut m, [ring(r0, a, -0.5), ring(r0, b, -0.5), ring(r0, b, 0.5), ring(r0, a, 0.5)], [-radial(a), -radial(b), -radial(b), -radial(a)]);
+        }
+    }
+    for (t, n) in [(0.0, -tangent(0.0)), (angle, tangent(angle))] {
+        quad(&mut m, [ring(r0, t, -0.5), ring(r1, t, -0.5), ring(r1, t, 0.5), ring(r0, t, 0.5)], [n; 4]);
+    }
+    m
+}
+
+fn ring(r: f32, t: f32, y: f32) -> Vec3 {
+    Vec3::new(r * t.cos(), y, r * t.sin())
+}
+
+// Four corners in order round the quad, wound to face the way their normals point.
+fn quad(m: &mut MeshData, corners: [Vec3; 4], normals: [Vec3; 4]) {
+    let first = m.vertices.len() as u32;
+    for (p, n) in corners.iter().zip(normals) {
+        m.vertices.push(Vertex { pos: (*p).into(), normal: n.into(), extra: 0.0 });
+    }
+    let facing = (corners[1] - corners[0]).cross(corners[2] - corners[0]).dot(normals.iter().sum::<Vec3>()) > 0.0;
+    let order = if facing { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] };
+    m.indices.extend(order.map(|i| first + i));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +278,27 @@ mod tests {
             assert!(tri_normals(&m).all(|(n, _)| n.y > 0.0));
             assert!(m.vertices.iter().all(|v| v.normal[1] > 0.0));
         }
+    }
+
+    #[test]
+    fn ring_wedges_wind_with_their_normals_pointing_out() {
+        let (r0, r1, angle) = (0.18_f32, 0.57, std::f32::consts::FRAC_PI_3);
+        // Inside the wedge: between the radii, the two sides and the caps.
+        let inside = |p: Vec3| {
+            let (r, t) = (p.x.hypot(p.z), p.z.atan2(p.x));
+            (r0..=r1).contains(&r) && (0.0..=angle).contains(&t) && p.y.abs() <= 0.5
+        };
+        let m = sector_prism(r0, r1, angle, 4);
+        for t in m.indices.chunks(3) {
+            let v = |i: u32| m.vertices[i as usize];
+            let (a, b, c) = (Vec3::from(v(t[0]).pos), Vec3::from(v(t[1]).pos), Vec3::from(v(t[2]).pos));
+            let n = Vec3::from(v(t[0]).normal) + Vec3::from(v(t[1]).normal) + Vec3::from(v(t[2]).normal);
+            let centre = (a + b + c) / 3.0;
+            assert!((b - a).cross(c - a).dot(n) > 0.0, "winding against the normal at {centre}");
+            assert!(!inside(centre + n.normalize() * 0.01) && inside(centre - n.normalize() * 0.01), "normal points in at {centre}");
+        }
+        let flat = sector(r0, r1, angle, 4);
+        assert!(tri_normals(&flat).all(|(n, _)| n.y > 0.0));
     }
 
     #[test]

@@ -4,7 +4,8 @@
 // `place = lat, lon` overrides the place guessed from the time zone (sunrise and sunset).
 // Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
 // --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
-// local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock).
+// local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
+// --toggle-clock S (break and mend the post clock every S seconds, not saved).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use meadow_core::frame_pacer::{FramePacer, parse_fps};
 use meadow_core::settings::{self, Setting, Settings};
+use meadow_core::wreck::Wreck;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -29,7 +31,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use gpu::{Frame, Gpu};
-use render::Renderer;
+use render::{ClockPose, Renderer};
 
 // winit never reports WindowEvent::Occluded on Windows, so while wgpu says the surface is
 // occluded we just try again this often.
@@ -53,6 +55,8 @@ struct App {
     last_frame: Option<Instant>,
     time: f64, // animation clock, s
     sky: sky_clock::SkyClock,
+    wreck: Wreck, // the post clock, standing or in pieces
+    toggle_clock: Option<(f64, f64)>, // --toggle-clock: every, next (animation time, s)
     frames: u32,
     window_start: Instant,
     #[cfg(windows)]
@@ -73,8 +77,23 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
         let time = self.time + dt;
-        let (sky, hands) = (self.sky.state(time), self.sky.hands());
-        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, dt, &sky, hands)) {
+        let unix = unix_now();
+        if let Some((every, next)) = self.toggle_clock.as_mut()
+            && time >= *next
+        {
+            *next += *every;
+            self.wreck.set(!self.wreck.broken(), unix);
+        }
+        self.wreck.update(dt, unix);
+        let sky = self.sky.state(time);
+        let clock = ClockPose {
+            hands: self.sky.hands(self.wreck.behind(unix)),
+            fallen: self.wreck.progress(),
+            shiver: self.wreck.shiver(),
+            weathering: self.wreck.weathering(unix),
+            glow: self.wreck.glow(),
+        };
+        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, dt, &sky, &clock)) {
             Frame::Occluded => {
                 if self.retry_at.is_none() {
                     log::info!("occluded: pausing");
@@ -116,7 +135,6 @@ impl App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window);
         let mut renderer = Renderer::new(&gpu.device, gpu.config.format, gpu.config.width, gpu.config.height, self.settings.pixel_size);
-        renderer.show_clock = self.settings.show_clock;
         renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
         self.gpu = Some((gpu, renderer));
     }
@@ -177,10 +195,15 @@ impl App {
             Setting::Clock(on) => self.sky.set_clock(on, self.time),
             Setting::Fog(fog) => self.sky.fog = fog,
             Setting::ShowClock(on) => {
-                if let Some((_, renderer)) = self.gpu.as_mut() {
-                    renderer.show_clock = on;
+                self.wreck.set(!on, unix_now());
+                // The hands stop where they are (even mid catch-up): the pieces' age counts from then.
+                if let Some(stopped) = self.wreck.stopped().filter(|_| !on) {
+                    let broken_at = Setting::BrokenAt(stopped.round() as i64);
+                    self.settings.set(broken_at);
+                    save_setting(broken_at);
                 }
             }
+            Setting::BrokenAt(_) => {}
         }
         save_setting(setting);
     }
@@ -289,6 +312,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
@@ -359,6 +386,7 @@ fn main() {
         (false, None) => sky_clock::Mode::Cycle(None),
     };
     settings.clock = mode == sky_clock::Mode::Clock;
+    let toggle_clock = arg(&args, "--toggle-clock").map(|v| v.parse().ok().filter(|s: &f64| *s > 0.0).unwrap_or_else(|| panic!("--toggle-clock must be seconds, like 8, got {v}")));
     log::info!("settings: {settings:?}");
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
@@ -372,6 +400,9 @@ fn main() {
     let now = Instant::now();
     let mut app = App {
         sky: sky_clock::SkyClock::new(mode, text.as_deref(), settings.fog),
+        // Off since `brokenAt` (or now, if that's missing).
+        wreck: Wreck::new((!settings.show_clock).then(|| settings.broken_at.map_or_else(unix_now, |t| t as f64))),
+        toggle_clock: toggle_clock.map(|every| (every, every)),
         settings,
         gpu: None,
         pacer: FramePacer::default(),
