@@ -14,3 +14,4 @@ pub mod settings;
 pub mod sky;
 pub mod sun;
 pub mod world;
+pub mod wreck;
