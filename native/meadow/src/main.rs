@@ -1,10 +1,15 @@
 // The meadow at noon: ground, paths, pond, trees and rocks, toon-lit with pixel outlines.
-// Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 2).
-// Backend override: WGPU_BACKEND=dx12|vulkan.
+// Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 2),
+// --wallpaper (Windows: behind the desktop icons, with a tray menu).
+// Backend override: WGPU_BACKEND=dx12|vulkan. Release builds have no console: they log to
+// %APPDATA%\pixel3d\log.txt.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod camera;
 mod gpu;
 mod mesh;
 mod render;
+#[cfg(windows)]
+mod wallpaper;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +29,11 @@ use render::Renderer;
 const OCCLUDED_RETRY: Duration = Duration::from_millis(250);
 const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
 
+#[cfg(windows)]
+type UserEvent = tray_icon::menu::MenuEvent;
+#[cfg(not(windows))]
+type UserEvent = ();
+
 struct App {
     fps: Option<u32>, // None: no cap, vsync paces the loop
     pixel_size: u32,
@@ -32,11 +42,14 @@ struct App {
     start: Instant,
     resized: Option<PhysicalSize<u32>>, // applied once, just before the next frame
     minimised: bool,
+    paused: bool, // wallpaper mode: a maximised or fullscreen window hides the desktop
     retry_at: Option<Instant>, // set while the surface is occluded
     last_frame: Option<Instant>,
     time: f64, // animation clock, s
     frames: u32,
     window_start: Instant,
+    #[cfg(windows)]
+    desktop: Option<wallpaper::Desktop>, // Some in wallpaper mode
 }
 
 impl App {
@@ -78,14 +91,20 @@ impl App {
             self.window_start = Instant::now();
         }
     }
-}
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gpu.is_some() {
-            return;
+    fn open(&mut self, event_loop: &ActiveEventLoop) {
+        #[allow(unused_mut)]
+        let mut attrs = Window::default_attributes().with_title("meadow").with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        #[cfg(windows)]
+        if let Some(desktop) = self.desktop.as_mut()
+            && !desktop.fallback
+        {
+            match desktop.window_attributes() {
+                Some(behind_icons) => attrs = behind_icons,
+                None if desktop.fallback => {}
+                None => return, // no desktop yet: the next check tries again
+            }
         }
-        let attrs = Window::default_attributes().with_title("meadow").with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window);
         let mut renderer = Renderer::new(&gpu.device, gpu.config.format, gpu.config.width, gpu.config.height, self.pixel_size);
@@ -93,9 +112,68 @@ impl ApplicationHandler for App {
         self.gpu = Some((gpu, renderer));
     }
 
+    /// Wallpaper mode, every CHECK_EVERY: (re)open the window behind the icons if it's gone, and
+    /// pause while the desktop is hidden. Returns when to check next (None outside wallpaper mode).
+    #[cfg(windows)]
+    fn check_desktop(&mut self, event_loop: &ActiveEventLoop) -> Option<Instant> {
+        let desktop = self.desktop.as_mut()?;
+        let now = Instant::now();
+        if now < desktop.next_check {
+            return Some(desktop.next_check);
+        }
+        desktop.next_check = now + wallpaper::CHECK_EVERY;
+        let (next, fallback) = (desktop.next_check, desktop.fallback);
+        if self.gpu.is_none() {
+            self.open(event_loop);
+            return Some(next);
+        }
+        let covered = !fallback && wallpaper::desktop_covered();
+        if covered != self.paused {
+            log::info!("{}", if covered { "desktop covered: pausing" } else { "desktop visible again" });
+            self.paused = covered;
+            self.last_frame = None; // no catch-up jump
+            self.frames = 0; // and the fps log doesn't average over the pause
+            self.window_start = now;
+        }
+        Some(next)
+    }
+
+    #[cfg(not(windows))]
+    fn check_desktop(&mut self, _: &ActiveEventLoop) -> Option<Instant> {
+        None
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        if let Some(desktop) = self.desktop.as_mut() {
+            desktop.show_tray();
+        }
+        if self.gpu.is_none() {
+            self.open(event_loop);
+        }
+    }
+
+    #[cfg(windows)]
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if self.desktop.as_ref().is_some_and(|desktop| desktop.menu(&event)) {
+            event_loop.exit();
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Wallpaper mode: an Explorer restart takes our window down with the desktop; the
+            // next check opens a new one.
+            #[cfg(windows)]
+            WindowEvent::Destroyed if self.desktop.is_some() => {
+                if self.gpu.take().is_some() {
+                    log::warn!("window destroyed with the desktop: reopening");
+                }
+                self.desktop.as_mut().unwrap().lost();
+            }
             WindowEvent::Resized(size) => {
                 // A 0 size is a minimised window: keep the old surface and targets untouched.
                 self.minimised = size.width == 0 || size.height == 0;
@@ -105,7 +183,7 @@ impl ApplicationHandler for App {
                 log::info!("resized {}x{}{}", size.width, size.height, if self.minimised { " (paused)" } else { "" });
             }
             WindowEvent::RedrawRequested => {
-                if self.minimised {
+                if self.minimised || self.paused {
                     return;
                 }
                 // Uncapped, vsync paces the loop and every redraw draws.
@@ -118,14 +196,20 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some((gpu, _)) = self.gpu.as_ref() else { return };
+        // Frames come far more often than checks, so waiting for the next frame never delays one.
+        let check_at = self.check_desktop(event_loop);
+        let idle = check_at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        let Some((gpu, _)) = self.gpu.as_ref() else {
+            event_loop.set_control_flow(idle);
+            return;
+        };
         if gpu.failed() {
             log::error!("gpu failed: exiting");
             event_loop.exit();
             return;
         }
-        if self.minimised {
-            event_loop.set_control_flow(ControlFlow::Wait); // the restore Resized event wakes us
+        if self.minimised || self.paused {
+            event_loop.set_control_flow(idle); // the restore Resized event or the next check wakes us
             return;
         }
         let now = Instant::now();
@@ -158,9 +242,29 @@ fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
+fn log_file() -> Option<std::fs::File> {
+    let dir = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("pixel3d");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("log.txt")).ok()
+}
+
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("meadow=info,wgpu_core=warn,wgpu_hal=warn")).init();
     let args: Vec<String> = std::env::args().collect();
+    let wallpaper = args.iter().any(|a| a == "--wallpaper");
+    #[cfg(windows)]
+    if wallpaper && wallpaper::already_running() {
+        return; // before the logger: the running one keeps its log file
+    }
+    #[cfg(not(windows))]
+    assert!(!wallpaper, "--wallpaper is Windows only");
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("meadow=info,wgpu_core=warn,wgpu_hal=warn"));
+    if cfg!(all(windows, not(debug_assertions)))
+        && let Some(file) = log_file()
+    {
+        logger.target(env_logger::Target::Pipe(Box::new(file)));
+        std::panic::set_hook(Box::new(|info| log::error!("{info}"))); // no console to print to
+    }
+    logger.init();
     let fps = match arg(&args, "--fps").as_deref() {
         None => Some(15),
         Some("0") => None,
@@ -172,7 +276,14 @@ fn main() {
     };
     log::info!("fps cap: {}, pixel size {pixel_size}", fps.map_or("none (vsync)".into(), |f| f.to_string()));
 
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
+    #[cfg(windows)]
+    {
+        let proxy = event_loop.create_proxy();
+        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = proxy.send_event(event);
+        }));
+    }
     let now = Instant::now();
     let mut app = App {
         fps,
@@ -182,11 +293,14 @@ fn main() {
         start: now,
         resized: None,
         minimised: false,
+        paused: false,
         retry_at: None,
         last_frame: None,
         time: 0.0,
         frames: 0,
         window_start: now,
+        #[cfg(windows)]
+        desktop: wallpaper.then(wallpaper::Desktop::new),
     };
     event_loop.run_app(&mut app).expect("event loop");
 }
