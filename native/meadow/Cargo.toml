@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Pinned to the versions egui-wgpu / egui-winit 0.36 build against (egui returns in sub-project 5).
+# Pinned to the wgpu / winit pair egui 0.36 builds against (egui was dropped: settings live in the tray menu).
 wgpu = "30"
 winit = "0.30"
 pollster = "0.4"

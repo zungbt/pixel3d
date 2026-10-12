@@ -3,7 +3,8 @@
 //! Read every frame, so midnight, DST changes and long pauses need nothing special.
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use meadow_core::sky::{self, SkyState};
+use meadow_core::clock;
+use meadow_core::sky::{self, Fog, SkyState};
 use meadow_core::sun::{self, Date, SunTimes};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,21 +19,28 @@ pub struct SkyClock {
     tz: TimeZone,
     place: (f64, f64),
     cycle_start: f64, // cycle mode: day_t at animation time 0
+    pub fog: Fog,
 }
 
 struct Now {
     date: Date,
     hour: f64,
     offset_min: i32,
+    hms: (u32, u32, f64),
 }
 
 fn now(tz: &TimeZone) -> Now {
-    let z = Timestamp::now().to_zoned(tz.clone());
+    at(tz, Timestamp::now())
+}
+
+fn at(tz: &TimeZone, t: Timestamp) -> Now {
+    let z = t.to_zoned(tz.clone());
     let seconds = z.second() as f64 + z.subsec_nanosecond() as f64 * 1e-9;
     Now {
         date: Date { year: z.year() as i32, month: z.month() as u8, day: z.day() as u8 },
         hour: z.hour() as f64 + z.minute() as f64 / 60.0 + seconds / 3600.0,
         offset_min: z.offset().seconds() / 60,
+        hms: (z.hour() as u32, z.minute() as u32, seconds),
     }
 }
 
@@ -40,8 +48,13 @@ fn day_t(mode: Mode, now_hour: f64, sun: SunTimes, cycle_start: f64, anim_time: 
     match mode {
         Mode::Clock => sky::clock_time(now_hour, sun),
         Mode::Hour(h) => sky::clock_time(h, sun),
-        Mode::Cycle(_) => (cycle_start + anim_time) % sky::DAY_LENGTH,
+        Mode::Cycle(_) => (cycle_start + anim_time).rem_euclid(sky::DAY_LENGTH),
     }
+}
+
+/// The cycle start that shows `day_t` at `anim_time`.
+fn carry_on(day_t: f64, anim_time: f64) -> f64 {
+    (day_t - anim_time).rem_euclid(sky::DAY_LENGTH)
 }
 
 fn utc_offset(min: i32) -> String {
@@ -88,7 +101,7 @@ pub fn read_settings(path: &std::path::Path) -> Result<Option<String>, String> {
 
 impl SkyClock {
     /// `settings`: the text of %APPDATA%\pixel3d\settings.txt, if there is one.
-    pub fn new(mode: Mode, settings: Option<&str>) -> Self {
+    pub fn new(mode: Mode, settings: Option<&str>, fog: Fog) -> Self {
         let tz = TimeZone::try_system().unwrap_or_else(|e| {
             log::warn!("sky: no system time zone ({e}), using the OS's current UTC offset");
             fallback_zone(os_offset_min())
@@ -123,14 +136,38 @@ impl SkyClock {
             hhmm(today.rise),
             hhmm(today.set),
         );
-        Self { mode, tz, place, cycle_start }
+        Self { mode, tz, place, cycle_start, fog }
+    }
+
+    /// The local clock, or (false) the web's 300 s day carrying on from the time shown now.
+    pub fn set_clock(&mut self, on: bool, anim_time: f64) {
+        if on {
+            self.mode = Mode::Clock;
+            return;
+        }
+        if !matches!(self.mode, Mode::Cycle(_)) {
+            let now = now(&self.tz);
+            let shown = day_t(self.mode, now.hour, sun::sun_times(now.date, now.offset_min, self.place), self.cycle_start, anim_time);
+            self.cycle_start = carry_on(shown, anim_time);
+            self.mode = Mode::Cycle(None);
+        }
+    }
+
+    /// The post clock's (hour, minute) hands: always the local time, whatever the sky shows, less
+    /// `behind` s (stopped, or still catching up).
+    pub fn hands(&self, behind: f64) -> (f64, f64) {
+        let (h, m, s) = at(&self.tz, Timestamp::now() - jiff::SignedDuration::from_secs_f64(behind)).hms;
+        clock::hand_angles(h, m, s)
     }
 
     /// The sky for right now; `anim_time` (s) only drives the cycle mode.
     pub fn state(&self, anim_time: f64) -> SkyState {
         let now = now(&self.tz);
         let sun = sun::sun_times(now.date, now.offset_min, self.place);
-        sky::sky_state(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time), sun::winterness(now.date, self.place.0))
+        let winter = sun::winterness(now.date, self.place.0);
+        let mut state = sky::sky_state(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time), winter);
+        state.fog = sky::fog_amount(self.fog, state.elevation, winter);
+        state
     }
 }
 
@@ -155,6 +192,16 @@ mod tests {
         assert!((cycle(0.0) - 18.5).abs() < 1e-6);
         assert!((cycle(sky::DAY_LENGTH) - 18.5).abs() < 1e-6, "a full day later");
         assert!((cycle(sky::DAY_LENGTH / 4.0) - 18.5).abs() > 1.0, "and moves in between");
+    }
+
+    #[test]
+    fn switching_to_the_5_minute_day_carries_on_from_the_shown_time() {
+        let shown = sky::clock_time(21.0, SUN);
+        for anim in [0.0, 42.0, 1000.0] {
+            let start = carry_on(shown, anim);
+            assert!((day_t(Mode::Cycle(None), 13.0, SUN, start, anim) - shown).abs() < 1e-9, "at animation time {anim}");
+            assert!(day_t(Mode::Cycle(None), 13.0, SUN, start, anim + 1.0) > shown, "and moves on");
+        }
     }
 
     #[test]

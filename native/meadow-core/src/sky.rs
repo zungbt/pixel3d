@@ -62,10 +62,22 @@ pub fn clock_time(hour: f64, sun: SunTimes) -> f64 {
     ((hour_to_phase(hour, sun) - DAY_START) % 1.0 + 1.0) % 1.0 * DAY_LENGTH
 }
 
-/// The web's 'auto' ground fog: rolls in at dusk and burns off after sunrise, thicker in winter
-/// (winterness, 0-1).
-pub fn fog_amount(elevation: f64, winter: f64) -> f64 {
-    (1.0 - smoothstep(elevation, -0.05, 0.2)) * lerp(0.35, 1.0, winter)
+/// The ground fog setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fog {
+    Off,
+    Auto,
+    Always,
+}
+
+/// Ground fog: `Auto` rolls in at dusk and burns off after sunrise, thicker in winter
+/// (winterness, 0-1); `Always` is full fog day and night.
+pub fn fog_amount(mode: Fog, elevation: f64, winter: f64) -> f64 {
+    match mode {
+        Fog::Off => 0.0,
+        Fog::Always => 1.0,
+        Fog::Auto => (1.0 - smoothstep(elevation, -0.05, 0.2)) * lerp(0.35, 1.0, winter),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -81,7 +93,7 @@ pub struct SkyState {
     pub fog: f64, // ground fog amount, 0-1
 }
 
-/// The web's `update(t, dayT, fog)` for `fog.mode = 'auto'`.
+/// The web's `update(t, dayT, fog)` for `fog.mode = 'auto'`; other modes: set `fog` with fog_amount.
 pub fn sky_state(day_t: f64, winter: f64) -> SkyState {
     let phase = (day_t / DAY_LENGTH + DAY_START) % 1.0;
     let angle = (day_t / DAY_LENGTH + DAY_START) * PI * 2.0;
@@ -104,7 +116,7 @@ pub fn sky_state(day_t: f64, winter: f64) -> SkyState {
     let hemi_sky = scale(mix(linear(HEMI_NIGHT), linear(HEMI_DAY), twilight), lerp(2.1, 1.2, twilight));
     let background = mix(mix(linear(SKY_NIGHT), linear(SKY_DAY), daylight), linear(SKY_DUSK), dusk * 0.6);
     let fog_color = mix(mix(linear(FOG_NIGHT), linear(FOG_DAY), daylight), linear(SKY_DUSK), dusk * 0.3);
-    SkyState { phase, elevation, daylight, sun_pos, sun_color, hemi_sky, background, fog_color, fog: fog_amount(elevation, winter) }
+    SkyState { phase, elevation, daylight, sun_pos, sun_color, hemi_sky, background, fog_color, fog: fog_amount(Fog::Auto, elevation, winter) }
 }
 
 #[cfg(test)]
@@ -158,11 +170,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_fog_dusk_to_dawn_thicker_in_winter() {
-        // The web's 'off' and 'always' modes arrive with the settings in sub-project 5.
-        assert_eq!(fog_amount(1.0, 1.0), 0.0, "none at noon");
-        assert_eq!(fog_amount(-0.5, 1.0), 1.0, "full on a winter night");
-        assert!(fog_amount(-0.5, 0.0) < 0.5, "thin on a summer night");
+    fn auto_fog_dusk_to_dawn_thicker_in_winter_off_and_always() {
+        assert_eq!(fog_amount(Fog::Off, -1.0, 1.0), 0.0);
+        assert_eq!(fog_amount(Fog::Always, 1.0, 0.0), 1.0);
+        assert_eq!(fog_amount(Fog::Auto, 1.0, 1.0), 0.0, "none at noon");
+        assert_eq!(fog_amount(Fog::Auto, -0.5, 1.0), 1.0, "full on a winter night");
+        assert!(fog_amount(Fog::Auto, -0.5, 0.0) < 0.5, "thin on a summer night");
     }
 
     #[test]

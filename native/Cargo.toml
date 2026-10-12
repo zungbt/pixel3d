@@ -1,3 +1,8 @@
 [workspace]
 members = ["meadow", "meadow-core"]
 resolver = "3"
+
+# The shipped exe: smaller and a little faster; the panic hook still logs the message.
+[profile.release]
+lto = true
+strip = true

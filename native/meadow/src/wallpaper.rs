@@ -1,9 +1,12 @@
 //! Wallpaper mode (Windows): the meadow lives behind the desktop icons, pauses while a maximised
-//! or fullscreen window hides the desktop, and a tray icon offers autostart and exit.
+//! or fullscreen window hides the desktop, and a tray icon offers the settings, autostart and exit.
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem};
+use meadow_core::frame_pacer::FPS_CAPS;
+use meadow_core::settings::{PIXEL_SIZES, Setting, Settings};
+use meadow_core::sky::Fog;
+use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -39,9 +42,22 @@ pub fn already_running() -> bool {
     }
 }
 
+pub enum TrayAction {
+    Exit,
+    Set(Setting),
+}
+
+struct Tray {
+    _icon: TrayIcon,
+    choices: Vec<(CheckMenuItem, Setting)>, // one checked per kind of setting, like radio buttons
+    show_clock: CheckMenuItem,
+    autostart: CheckMenuItem,
+    exit: MenuItem,
+}
+
 pub struct Desktop {
     host: HWND, // our window's parent behind the icons; null until attached
-    tray: Option<(TrayIcon, CheckMenuItem, MenuItem)>, // icon, autostart, exit
+    tray: Option<Tray>,
     since: Instant, // when we started looking for the desktop
     pub next_check: Instant,
     pub fallback: bool, // gave up on the desktop: a normal window
@@ -54,25 +70,62 @@ impl Desktop {
     }
 
     /// Call once the event loop runs (the tray needs its message pump).
-    pub fn show_tray(&mut self) {
+    pub fn show_tray(&mut self, settings: &Settings) {
         if self.tray.is_some() {
             return;
         }
+        let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
+        let groups: [(&str, Vec<(String, Setting)>); 4] = [
+            ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
+            ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
+            ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
+            ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
+        ];
+        let menu = Menu::new();
+        let mut choices = Vec::new();
+        for (title, group) in groups {
+            // Checked if choosing it would change nothing.
+            let items: Vec<_> = group
+                .into_iter()
+                .map(|(label, setting)| {
+                    let mut chosen = *settings;
+                    chosen.set(setting);
+                    (CheckMenuItem::new(label, true, chosen == *settings, None), setting)
+                })
+                .collect();
+            let refs: Vec<&dyn IsMenuItem> = items.iter().map(|(item, _)| item as &dyn IsMenuItem).collect();
+            menu.append(&Submenu::with_items(title, true, &refs).expect("tray submenu")).expect("tray menu");
+            choices.extend(items);
+        }
+        let show_clock = CheckMenuItem::new("Hiện đồng hồ", true, settings.show_clock, None);
         let autostart = CheckMenuItem::new("Chạy cùng Windows", true, autostart_enabled(), None);
         let exit = MenuItem::new("Thoát", true, None);
-        let menu = Menu::new();
-        menu.append_items(&[&autostart, &exit]).expect("tray menu");
+        menu.append_items(&[&show_clock, &PredefinedMenuItem::separator(), &autostart, &exit]).expect("tray menu");
         let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("pixel3d meadow").with_icon(icon()).build().expect("tray icon");
-        self.tray = Some((icon, autostart, exit));
+        self.tray = Some(Tray { _icon: icon, choices, show_clock, autostart, exit });
     }
 
-    /// Handles a tray menu click; true means exit.
-    pub fn menu(&self, event: &MenuEvent) -> bool {
-        let Some((_, autostart, exit)) = &self.tray else { return false };
-        if event.id == *autostart.id() {
-            set_autostart(autostart.is_checked());
+    /// Handles a tray menu click.
+    pub fn menu(&self, event: &MenuEvent) -> Option<TrayAction> {
+        let tray = self.tray.as_ref()?;
+        if event.id == *tray.autostart.id() {
+            set_autostart(tray.autostart.is_checked());
+            return None;
         }
-        event.id == *exit.id()
+        if event.id == *tray.exit.id() {
+            return Some(TrayAction::Exit);
+        }
+        if event.id == *tray.show_clock.id() {
+            return Some(TrayAction::Set(Setting::ShowClock(tray.show_clock.is_checked())));
+        }
+        // A click toggles its check: put the whole group right, this one checked even if it was.
+        let &(_, chosen) = tray.choices.iter().find(|(item, _)| event.id == *item.id())?;
+        for (item, setting) in &tray.choices {
+            if std::mem::discriminant(setting) == std::mem::discriminant(&chosen) {
+                item.set_checked(*setting == chosen);
+            }
+        }
+        Some(TrayAction::Set(chosen))
     }
 
     /// False once the desktop (and our window with it) is gone.
