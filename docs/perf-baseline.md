@@ -50,3 +50,15 @@ These numbers come from an A/B run at 1080p: main and this change took turns, th
 |---|---|---|---|---|---|
 | main | 6.18 (5.29–6.84) | 2.80 | 2.71 | 0.30 | 0.12 |
 | grass culled | 4.89 (4.07–7.65) | 2.25 | 2.19 | 0.28 | 0.11 |
+
+## Native (Rust + wgpu) RAM
+
+Measured on Windows (Intel UHD Graphics, driver 101.6127, 60 Hz screen), release exe from `native/` (x86_64-pc-windows-gnu), window 1280×720. RAM from `Get-Process meadow` after 60 s; CPU is % of one core over 20 s. Web baseline to beat: Edge GPU process 270–300 MB + browser process 120–140 MB.
+
+| commit | change | backend | fps cap | working set (MB) | private (MB) | CPU |
+|---|---|---|---|---|---|---|
+| spike | blank window + egui label | Vulkan (default) | 60 | 145 | 80 | ~16 % |
+| spike | blank window + egui label | DX12 | 60 | 142 | 120 | ~17 % |
+| spike | blank window + egui label | Vulkan | none (vsync) / 30 / 15 | – | – | 14.1 / 7.5 / 4.1 % |
+
+CPU scales with frames drawn (~2.3 ms per frame), with or without the `WaitUntil` cap, so it's per-frame render/present cost, not the pacer. Fps cap holds within ±0.5 at 60/30/15.
