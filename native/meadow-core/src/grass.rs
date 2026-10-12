@@ -1,0 +1,239 @@
+//! Grass blades over the whole ground, ported from the web's `src/grass.js`: dart throwing, thinned
+//! by a density map (none on the beach, the paths or under rocks; sparse in noisy patches and under
+//! tree crowns). Same `rand()` order as the web, but not the same blades: the hills and rocks already
+//! differ, and the area is the 64-unit ground instead of the 48 placement area.
+use libm::{ceil, floor, hypot, pow, sqrt};
+
+use crate::rng::Mulberry32;
+use crate::world::{GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
+
+pub const ATTEMPTS: u32 = 240_000; // the web's ~59 per square unit, over the whole ground
+const HALF: f64 = GROUND_SIZE / 2.0 - 0.1; // just inside the ground
+const SEED: u32 = 99;
+const NORMAL_E: f64 = 0.25; // as the ground mesh's vertex normals: half its 0.5 cell
+
+// Canopy mask: 4 cells per unit over the placement area (no tree grows outside it).
+const MASK_RES: f64 = 4.0;
+const MASK_N: usize = (SIZE * MASK_RES) as usize;
+
+#[derive(Debug, PartialEq)]
+pub struct Blade {
+    pub x: f32,
+    pub y: f32, // height_at(x, z)
+    pub z: f32,
+    pub scale: f32,       // 0.7–1.3
+    pub color: [f32; 3],  // linear rgb
+    pub normal: [f32; 3], // the ground's normal at the base: outlines only, blades are lit as flat ground
+}
+
+/// The cells under a tree crown, so each blade does one lookup instead of a loop over all trees.
+pub struct CanopyMask(Vec<bool>);
+
+impl CanopyMask {
+    pub fn new(trees: &[Tree]) -> Self {
+        let mut mask = vec![false; MASK_N * MASK_N];
+        let cell = |v: f64| (v + SIZE / 2.0) * MASK_RES;
+        for t in trees {
+            let r = t.canopy;
+            let lo = |v: f64| floor(cell(v)).max(0.0) as usize;
+            let hi = |v: f64| (ceil(cell(v)).max(0.0) as usize).min(MASK_N);
+            for gz in lo(t.z - r)..hi(t.z + r) {
+                for gx in lo(t.x - r)..hi(t.x + r) {
+                    let cx = (gx as f64 + 0.5) / MASK_RES - SIZE / 2.0;
+                    let cz = (gz as f64 + 0.5) / MASK_RES - SIZE / 2.0;
+                    if hypot(cx - t.x, cz - t.z) < r {
+                        mask[gz * MASK_N + gx] = true;
+                    }
+                }
+            }
+        }
+        Self(mask)
+    }
+
+    /// Outside the placement area counts as uncovered.
+    pub fn covers(&self, x: f64, z: f64) -> bool {
+        let cell = |v: f64| floor((v + SIZE / 2.0) * MASK_RES);
+        let inside = |g: f64| (0.0..MASK_N as f64).contains(&g);
+        let (gx, gz) = (cell(x), cell(z));
+        inside(gx) && inside(gz) && self.0[gz as usize * MASK_N + gx as usize]
+    }
+}
+
+/// The chance a dart at (x, z) becomes a blade: thin under crowns and in noisy patches; none on the
+/// beach, the paths or under rocks, thickening back over a ragged edge past the first two.
+pub fn grass_density(x: f64, z: f64, mask: &CanopyMask, rocks: &[Rock]) -> f64 {
+    // Exact test, not the mask: a 0.25 cell would still let blades through small stones.
+    if rocks.iter().any(|r| {
+        let (dx, dz) = (r.x - x, r.z - z);
+        dx * dx + dz * dz < r.r * r.r
+    }) {
+        return 0.0;
+    }
+    let shore = smoothstep(sand_q(x, z), 1.0, 1.1);
+    let path = smoothstep(path_edge(x, z), 0.0, 0.8);
+    let density = shore * path * lerp(0.15, 1.0, smoothstep(fbm(x * 0.15 + 50.0, z * 0.15), 0.25, 0.5));
+    if mask.covers(x, z) { density * 0.25 } else { density }
+}
+
+/// Every blade on the ground for this layout (~160k). Seeded: the same layout gives the same blades.
+pub fn place_grass(layout: &Layout) -> Vec<Blade> {
+    let mut rng = Mulberry32::new(SEED);
+    let mut rand = move || rng.next();
+    let mask = CanopyMask::new(&layout.trees);
+    let mut blades = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let x = (rand() * 2.0 - 1.0) * HALF;
+        let z = (rand() * 2.0 - 1.0) * HALF;
+        if rand() > grass_density(x, z, &mask, &layout.rocks) {
+            continue;
+        }
+        let scale = 0.7 + rand() * 0.6;
+        let hue = 0.25 + rand() * 0.04;
+        let lightness = 0.71 + rand() * 0.1;
+        blades.push(Blade {
+            x: x as f32,
+            y: height_at(x, z) as f32,
+            z: z as f32,
+            scale: scale as f32,
+            color: hsl_linear(hue, 0.5, lightness),
+            normal: ground_normal(x, z),
+        });
+    }
+    blades
+}
+
+/// The terrain normal as the ground mesh computes it (central differences of `height_at`), so the
+/// outline pass sees no edge between a blade and the ground behind it.
+pub fn ground_normal(x: f64, z: f64) -> [f32; 3] {
+    let e = NORMAL_E;
+    let dx = height_at(x + e, z) - height_at(x - e, z);
+    let dz = height_at(x, z + e) - height_at(x, z - e);
+    let len = sqrt(dx * dx + 4.0 * e * e + dz * dz);
+    [(-dx / len) as f32, (2.0 * e / len) as f32, (-dz / len) as f32]
+}
+
+// three's Color.setHSL(h, s, l, SRGBColorSpace): HSL taken as sRGB, then decoded to linear.
+fn hsl_linear(h: f64, s: f64, l: f64) -> [f32; 3] {
+    let hi = if l <= 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let lo = 2.0 * l - hi;
+    let channel = |t: f64| {
+        let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
+        let c = if t < 1.0 / 6.0 {
+            lo + (hi - lo) * 6.0 * t
+        } else if t < 0.5 {
+            hi
+        } else if t < 2.0 / 3.0 {
+            lo + (hi - lo) * 6.0 * (2.0 / 3.0 - t)
+        } else {
+            lo
+        };
+        (if c < 0.04045 { c / 12.92 } else { pow((c + 0.055) / 1.055, 2.4) }) as f32
+    };
+    [channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0)]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use super::*;
+    use crate::world::place;
+
+    // Placement takes a while in debug builds: the tests share one run.
+    fn meadow() -> &'static (Layout, Vec<Blade>) {
+        static MEADOW: OnceLock<(Layout, Vec<Blade>)> = OnceLock::new();
+        MEADOW.get_or_init(|| {
+            let layout = place(42);
+            let blades = place_grass(&layout);
+            (layout, blades)
+        })
+    }
+
+    #[test]
+    fn same_layout_gives_the_same_blades() {
+        let (layout, blades) = meadow();
+        assert_eq!(&place_grass(layout), blades);
+    }
+
+    #[test]
+    fn acceptance_is_near_the_webs() {
+        let ratio = meadow().1.len() as f64 / ATTEMPTS as f64;
+        assert!((0.5..=0.85).contains(&ratio), "{ratio}");
+    }
+
+    #[test]
+    fn blades_keep_off_rocks_beach_and_paths() {
+        let tol = 1e-4; // positions are f32: ~4e-6 rounding at 32 units
+        let (layout, blades) = meadow();
+        for b in blades {
+            let (x, z) = (b.x as f64, b.z as f64);
+            for r in &layout.rocks {
+                assert!(hypot(r.x - x, r.z - z) >= r.r - tol, "blade in a rock at {x}, {z}");
+            }
+            assert!(sand_q(x, z) >= 1.0 - tol, "blade on the beach at {x}, {z}");
+            assert!(path_edge(x, z) >= -tol, "blade on a path at {x}, {z}");
+        }
+    }
+
+    #[test]
+    fn blades_sit_on_the_whole_ground() {
+        let blades = &meadow().1;
+        for b in blades {
+            let (x, z) = (b.x as f64, b.z as f64);
+            assert!(x.abs() <= HALF && z.abs() <= HALF);
+            assert!((b.y as f64 - height_at(x, z)).abs() < 1e-4);
+            assert!((0.7..=1.3).contains(&b.scale));
+            let [nx, ny, nz] = b.normal;
+            assert!(((nx * nx + ny * ny + nz * nz).sqrt() - 1.0).abs() < 1e-5 && ny > 0.7, "{:?}", b.normal);
+        }
+        // Out to the ground's edges, not just the 48 placement area.
+        let far = |f: fn(&Blade) -> f32| blades.iter().map(|b| f(b).abs()).fold(0.0, f32::max);
+        assert!(far(|b| b.x) > 31.0 && far(|b| b.z) > 31.0);
+    }
+
+    #[test]
+    fn mask_covers_exactly_the_cells_under_crowns() {
+        let trees = &meadow().0.trees;
+        let mask = CanopyMask::new(trees);
+        assert!(trees.iter().all(|t| mask.covers(t.x, t.z)));
+        for gz in 0..MASK_N {
+            for gx in 0..MASK_N {
+                let cx = (gx as f64 + 0.5) / MASK_RES - SIZE / 2.0;
+                let cz = (gz as f64 + 0.5) / MASK_RES - SIZE / 2.0;
+                let under = trees.iter().any(|t| hypot(cx - t.x, cz - t.z) < t.canopy);
+                assert_eq!(mask.covers(cx, cz), under, "cell {gx}, {gz}");
+            }
+        }
+        // Outside the placement area: uncovered, with no out-of-range lookup.
+        for (x, z) in [(-24.01, 0.0), (24.0, 0.0), (0.0, 31.9), (-31.9, -31.9)] {
+            assert!(!mask.covers(x, z));
+        }
+    }
+
+    #[test]
+    fn crowns_thin_the_grass_to_a_quarter() {
+        let layout = &meadow().0;
+        let mask = CanopyMask::new(&layout.trees);
+        let mut under = 0;
+        for t in &layout.trees {
+            for (dx, dz) in [(0.0, 0.0), (0.2, 0.1), (-0.1, -0.25)] {
+                let (x, z) = (t.x + dx, t.z + dz);
+                if mask.covers(x, z) {
+                    under += 1;
+                    assert!(grass_density(x, z, &mask, &layout.rocks) <= 0.25);
+                }
+            }
+        }
+        assert!(under > 0);
+    }
+
+    #[test]
+    fn hsl_matches_threes_set_hsl() {
+        let linear = |c: f64| pow((c + 0.055) / 1.055, 2.4) as f32; // every value here is above 0.04045
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(a, b)| (a - b).abs() < 1e-6);
+        assert!(close(hsl_linear(0.0, 1.0, 0.5), [1.0, 0.0, 0.0]));
+        assert!(close(hsl_linear(1.0 / 3.0, 1.0, 0.5), [0.0, 1.0, 0.0]));
+        // A grass colour: yellow-green, lightness above 0.5 → sRGB (0.75, 0.875, 0.625).
+        assert!(close(hsl_linear(0.25, 0.5, 0.75), [linear(0.75), linear(0.875), linear(0.625)]));
+    }
+}

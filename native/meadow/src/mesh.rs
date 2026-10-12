@@ -18,11 +18,11 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
-const GROUND_SIZE: f64 = 64.0; // larger than the placement area, so no screen corner shows its edge
 const GROUND_CELL: f64 = 0.5;
 
 /// The terrain, with smooth normals (no faceted bands) and soft light/dark tint patches.
 pub fn ground() -> MeshData {
+    use world::GROUND_SIZE;
     let n = (GROUND_SIZE / GROUND_CELL) as u32;
     let mut vertices = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
     for j in 0..=n {
