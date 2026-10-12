@@ -20,7 +20,7 @@ Decided with user:
 ## Architecture (workspace `native/`)
 - **`meadow-core`** (lib, no GPU deps, `cargo test` on Linux): `rng` (mulberry32/rngFor), `motion`, `world` (heightAt, path SDF, placements, obstacles), `grass`, `flowers`, `sky`, `sun`, `clock`, `settings`, `frame_pacer`, `insects/*`. Sim outputs plain structs; tests read those (fixes the JS sim/render coupling). Time-dependent functions take an explicit UTC offset / zone, never `Local`, so tests don't depend on the machine's TZ.
 - **`meadow`** (bin): winit 0.30 `ApplicationHandler`; `gpu`, `camera`, `mesh` (hand-built flat primitives), `render`, `post`, `ui`, `shaders/*.wgsl`.
-- Crates: wgpu, winit, glam, bytemuck, pollster, log + env_logger; egui + egui-wgpu + egui-winit (sub-project 5); chrono + iana-time-zone (sun/clock). Settings: `key=value` file in `%APPDATA%\pixel3d\`, no serde.
+- Crates: wgpu, winit, glam, bytemuck, pollster, log + env_logger; egui + egui-wgpu + egui-winit (sub-project 5); jiff (sun/clock: system zone → IANA, local time; already in the lock via env_logger). Settings: `key=value` file in `%APPDATA%\pixel3d\`, no serde.
 - Shaders: `common.wgsl` (noise, cloud shade, ground fog, 4-step toon, 5-tap PCF) prepended via `include_str!`. Everything drawn instanced (mat4 + colour + wind factor). Fixed pipelines: shadow, toon, water, unlit (opaque/alpha), post, egui. Tree sway moves to the vertex shader.
 
 ## Frame loop (traced — differs from the web on purpose)
