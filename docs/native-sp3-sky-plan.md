@@ -1068,8 +1068,9 @@ const browser = await chromium.launch({
 });
 const page = await browser.newPage({ viewport: { width: w, height: h }, timezoneId: zone });
 await page.goto('http://127.0.0.1:5173/?px=2');
+await page.waitForTimeout(3000); // load first: the slider's sky keeps moving at 300 s a day (~14 min per 3 s)
 await page.evaluate((v) => { const s = document.querySelector('#time input'); s.value = v; s.dispatchEvent(new Event('input')); }, hour);
-await page.waitForTimeout(3000);
+await page.waitForTimeout(200);
 await page.screenshot({ path: out });
 await browser.close();
 ```
@@ -1087,16 +1088,17 @@ Read each pair (`sky-H.png` beside `web-sky-H.png`) with the Read tool. Check:
 - cloud shadow blobs present (their positions differ: the cloud clocks differ);
 - fog in the hollows at 18:30 and 02:00 (thicker in winter, thin now in October);
 - far-corner shadow cut at 06:00 / 18:30 (expected as on the web; report if it's more visible).
+- expected web-only extras: insects and the post clock (sub-projects 4 and 5).
 
 Report the differences to the user with the pairs; their visual OK is the gate.
 
 - [ ] **Step 4: Rise/set check against the web's code.**
 
 ```bash
-cd /home/dung/Study/pixel3d && TZ=Asia/Bangkok node --input-type=module -e "import { placeFor, sunTimes } from './src/sun.js'; const d = new Date(); const s = sunTimes(d, placeFor('Asia/Bangkok', d)); const f = (h) => String(Math.floor(h)).padStart(2, '0') + ':' + String(Math.round((h % 1) * 60)).padStart(2, '0'); console.log('web rise', f(s.rise), 'set', f(s.set));"
+cd /home/dung/Study/pixel3d && TZ=Asia/Bangkok node --input-type=module -e "import { placeFor, sunTimes } from './src/sun.js'; const d = new Date(); const s = sunTimes(d, placeFor('Asia/Bangkok', d)); const f = (h) => { const m = Math.round(h * 60) % 1440; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); }; console.log('web rise', f(s.rise), 'set', f(s.set));"
 ```
 
-Expected: the same HH:MM as the native log line (±1 min from rounding).
+Expected: the same HH:MM as the native log line (both round total minutes).
 
 - [ ] **Step 5: One `--cycle` run through dusk.**
 

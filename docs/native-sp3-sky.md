@@ -155,5 +155,6 @@ Ported 1:1 from `src/sky.js`.
 ## Risks
 - **Low-sun shadows past the ±22 box:** the web has the same box, so match it first and widen only if the screenshots show a cut.
 - **jiff can't map a Windows zone:** the offset fallback is logged; Vietnam/Thailand map through CLDR "SE Asia Standard Time".
+- **Vietnam gets Bangkok's sun:** Windows has one zone ("SE Asia Standard Time") for both, and jiff maps it to `Asia/Bangkok`, so a PC in Vietnam sees sunrise ~26 min late (06:08 vs HCMC's 05:42 on 12 Oct). The `place` line fixes it until sub-project 5's city input.
 - **Colour drift:** the web lerps three.js `Color`s, which are linear under `ColorManagement`, so native lerps in linear too. The side-by-side screenshots are the check.
 - **Clouds tied to the animation clock** stop moving while paused, as everything else does.
