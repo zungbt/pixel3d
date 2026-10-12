@@ -1,5 +1,5 @@
 //! Hand-built meshes: the ground, unit-sized rock / trunk / crown / flower shapes, the butterfly's
-//! body and wing, and the pond and beach fans.
+//! body and wing, the pond and beach fans, and the post clock's cylinders.
 use std::f64::consts::PI;
 
 use bytemuck::{Pod, Zeroable};
@@ -148,34 +148,38 @@ pub fn wing() -> MeshData {
     MeshData { vertices, indices: vec![0, 3, 2, 0, 2, 1] }
 }
 
-/// Unit-height trunk (three's CylinderGeometry(0.12, 0.16, 1, 6)): smooth sides, flat caps.
+/// Unit-height trunk (three's CylinderGeometry(0.12, 0.16, 1, 6)).
 pub fn trunk() -> MeshData {
-    const SEGMENTS: u32 = 6;
-    let (top, bottom) = (0.12_f32, 0.16_f32);
+    cylinder(0.12, 0.16, 6)
+}
+
+/// Unit-height cylinder about the origin (three's CylinderGeometry(top, bottom, 1, segments)):
+/// smooth sides, flat caps.
+pub fn cylinder(top: f32, bottom: f32, segments: u32) -> MeshData {
     let slope = bottom - top; // over a height of 1
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     for (y, r) in [(0.5_f32, top), (-0.5, bottom)] {
-        for s in 0..=SEGMENTS {
-            let theta = s as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        for s in 0..=segments {
+            let theta = s as f32 / segments as f32 * std::f32::consts::TAU;
             let (sin, cos) = theta.sin_cos();
             let normal = Vec3::new(sin, slope, cos).normalize();
             vertices.push(Vertex { pos: [r * sin, y, r * cos], normal: normal.into(), extra: 0.0 });
         }
     }
-    for s in 0..SEGMENTS {
-        let (a, b) = (s, s + SEGMENTS + 1); // top, bottom
+    for s in 0..segments {
+        let (a, b) = (s, s + segments + 1); // top, bottom
         indices.extend_from_slice(&[a, b, a + 1, b, b + 1, a + 1]);
     }
     for (y, r, ny) in [(0.5_f32, top, 1.0_f32), (-0.5, bottom, -1.0)] {
         let centre = vertices.len() as u32;
         vertices.push(Vertex { pos: [0.0, y, 0.0], normal: [0.0, ny, 0.0], extra: 0.0 });
-        for s in 0..=SEGMENTS {
-            let theta = s as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        for s in 0..=segments {
+            let theta = s as f32 / segments as f32 * std::f32::consts::TAU;
             let (sin, cos) = theta.sin_cos();
             vertices.push(Vertex { pos: [r * sin, y, r * cos], normal: [0.0, ny, 0.0], extra: 0.0 });
         }
-        for s in 0..SEGMENTS {
+        for s in 0..segments {
             let (a, b) = (centre + 1 + s, centre + 2 + s);
             if ny > 0.0 { indices.extend_from_slice(&[centre, a, b]) } else { indices.extend_from_slice(&[centre, b, a]) }
         }
@@ -212,7 +216,7 @@ mod tests {
 
     #[test]
     fn closed_solids_wind_outward() {
-        for m in [dodecahedron(), icosahedron(), octahedron(), cube(), trunk()] {
+        for m in [dodecahedron(), icosahedron(), octahedron(), cube(), trunk(), cylinder(0.57, 0.57, 24)] {
             for (n, centre) in tri_normals(&m) {
                 assert!(n.dot(centre) > 0.0, "inward triangle at {centre}");
             }

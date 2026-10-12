@@ -9,7 +9,7 @@ struct Globals {
     hemi_sky: vec4f,    // rgb × intensity
     hemi_ground: vec4f, // rgb × intensity
     water_tint: vec4f,  // white with a hint of the sky
-    params: vec4f,      // x: time (s)
+    params: vec4f,      // x: time (s), y: post clock face glow
     fog: vec4f,         // rgb: ground fog colour, a: amount (0: none)
 }
 

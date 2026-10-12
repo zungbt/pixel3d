@@ -86,8 +86,13 @@ fn shadow(world: vec3f, normal: vec3f) -> f32 {
 // Sun (or moon) through the toon ramp, shadow and cloud shade, plus the sky/ground hemisphere light
 // (Lambert, /π); then the ground fog over it, as the web's patched toon material.
 fn lighting(diffuse: vec3f, normal: vec3f, ramp: f32, lit: f32, world: vec3f) -> vec3f {
+    return glowing(diffuse, normal, ramp, lit, world, vec3f(0.0));
+}
+
+// The same with an emissive glow added before the fog.
+fn glowing(diffuse: vec3f, normal: vec3f, ramp: f32, lit: f32, world: vec3f, glow: vec3f) -> vec3f {
     let hemi = mix(g.hemi_ground.rgb, g.hemi_sky.rgb, normal.y * 0.5 + 0.5);
-    let color = diffuse / PI * (g.sun_color.rgb * ramp * lit * cloud_shade(world) + hemi);
+    let color = diffuse / PI * (g.sun_color.rgb * ramp * lit * cloud_shade(world) + hemi) + glow;
     return mix(color, g.fog.rgb, ground_fog(world));
 }
 
@@ -109,6 +114,15 @@ fn fs_toon(in: VertexOut) -> SceneOut {
 fn fs_insect(in: VertexOut, @builtin(front_facing) front: bool) -> SceneOut {
     let n = normalize(in.normal) * select(-1.0, 1.0, front);
     let color = lighting(in.color, n, toon(dot(n, g.sun_dir.xyz)), 1.0, in.world);
+    return SceneOut(vec4f(color, 1.0), view_normal(n));
+}
+
+// The post clock's face: glowing a warm cream (params.y) and unshadowed, as the web's: at noon the
+// sun grazes the upright face, and the shadow map can't tell the dial from the rim just behind it.
+@fragment
+fn fs_dial(in: VertexOut) -> SceneOut {
+    let n = normalize(in.normal);
+    let color = glowing(in.color, n, toon(dot(n, g.sun_dir.xyz)), 1.0, in.world, DIAL_GLOW * g.params.y);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 

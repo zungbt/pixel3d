@@ -6,6 +6,7 @@ use std::fmt::Write;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
+use meadow_core::clock;
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
 use meadow_core::gnats::{self, Gnats};
@@ -32,13 +33,17 @@ const SAND: u32 = 0xecd8b8;
 const TRUNK: u32 = 0x8d6d52;
 const LEAVES: u32 = 0x589e63;
 const ROCK: u32 = 0xaaafc2;
-const SHADER_COLORS: [(&str, u32); 6] = [
+const IRON: u32 = 0x3a4044; // the post clock's post and rim
+const INK: u32 = 0x23262b; // its ticks and hands
+const CREAM: u32 = 0xf3ead2; // its face
+const SHADER_COLORS: [(&str, u32); 7] = [
     ("PATH_COLOR", 0xc3a284),
     ("WATER_DEEP", 0x3a8fc9),
     ("WATER_MID", 0x4fb0dc),
     ("WATER_SHALLOW", 0x6fcbe6),
     ("WATER_BANK", 0x2c5a7a),
     ("WATER_FOAM", 0xeef6ff),
+    ("DIAL_GLOW", 0xffd890),
 ];
 
 fn linear(hex: u32) -> Vec3 {
@@ -102,6 +107,7 @@ enum Shade {
     Water,
     Insect,
     Unlit,
+    Dial,
 }
 
 struct Draw {
@@ -112,6 +118,82 @@ struct Draw {
     instance_count: u32,
     shade: Shade,
     casts_shadow: bool,
+}
+
+// The post clock: the post, rim and face stand still; the ticks and hands share one cube draw,
+// rewritten every frame with the hands (and the face, for its fog tint).
+struct PostClock {
+    frame: Mat4, // the clock's own space: on the grass, face toward the camera, scaled
+    dial_model: Mat4,
+    post: Draw,
+    rim: Draw,
+    dial: Draw,
+    ink: Draw, // 12 ticks, then the hour and minute hands
+    ticks: Vec<Instance>,
+}
+
+impl PostClock {
+    fn new(device: &wgpu::Device) -> Self {
+        use clock::{POST_H, R, SCALE, X, Z};
+        let (post_h, r) = (POST_H as f32, R as f32);
+        let frame = Mat4::from_translation(Vec3::new(X as f32, world::height_at(X, Z) as f32, Z as f32))
+            * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_4)
+            * Mat4::from_scale(Vec3::splat(SCALE as f32));
+        let at = |x: f32, y: f32, z: f32| frame * Mat4::from_translation(Vec3::new(x, y, z));
+        let upright = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2); // +y (a fan's or cylinder's axis) to +z
+        let post = Instance::new(at(0.0, post_h / 2.0, 0.0) * Mat4::from_scale(Vec3::new(1.0, post_h, 1.0)), IRON);
+        let rim = Instance::new(at(0.0, post_h, 0.0) * upright * Mat4::from_scale(Vec3::new(1.0, 0.14, 1.0)), IRON);
+        // A tick per hour; 12, 3, 6 and 9 are bigger.
+        let ticks = (0..12)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::PI / 6.0;
+                let size = if i % 3 == 0 { Vec3::new(0.07, 0.12, 0.02) } else { Vec3::new(0.045, 0.07, 0.02) };
+                let m = at(a.sin() * (r - 0.1), post_h + a.cos() * (r - 0.1), 0.08) * Mat4::from_rotation_z(-a) * Mat4::from_scale(size);
+                Instance::new(m, INK)
+            })
+            .collect::<Vec<_>>();
+        let ink = [ticks.as_slice(), &[Instance::new(Mat4::IDENTITY, INK); 2]].concat(); // hands posed before the first draw
+        let dial_model = at(0.0, post_h, 0.071) * upright;
+        PostClock {
+            frame,
+            dial_model,
+            post: upload(device, mesh::cylinder(0.06, 0.09, 6), &[post], Shade::Toon, true),
+            rim: upload(device, mesh::cylinder(r + 0.07, r + 0.07, 24), &[rim], Shade::Toon, true),
+            dial: upload(device, mesh::fan(|_| clock::R), &[Instance::new(dial_model, CREAM)], Shade::Dial, true),
+            ink: upload(device, mesh::cube(), &ink, Shade::Toon, true),
+            ticks,
+        }
+    }
+
+    /// The hands at `(hour, minute)` (radians clockwise from 12) and the face hazed by the fog.
+    fn pose(&self, queue: &wgpu::Queue, (hour, minute): (f64, f64), sky: &SkyState) {
+        // A box pivoting at its base, pointing up (12 o'clock) before turning clockwise.
+        let hand = |angle: f64, length: f32, width: f32, z: f32| {
+            let m = self.frame
+                * Mat4::from_translation(Vec3::new(0.0, clock::POST_H as f32, z))
+                * Mat4::from_rotation_z(-angle as f32)
+                * Mat4::from_translation(Vec3::new(0.0, length / 2.0 - 0.05, 0.0))
+                * Mat4::from_scale(Vec3::new(width, length, 0.02));
+            Instance::new(m, INK)
+        };
+        let mut ink = self.ticks.clone();
+        ink.extend([hand(hour, 0.3, 0.08, 0.09), hand(minute, 0.42, 0.06, 0.1)]);
+        queue.write_buffer(&self.ink.instances, 0, bytemuck::cast_slice(&ink));
+        // The ground fog barely reaches the face, so haze it here: duller and tinted by the fog.
+        let face = linear(CREAM).lerp(vec3(sky.fog_color), 0.35 * sky.fog as f32);
+        let dial = Instance { color: face.extend(1.0).into(), ..Instance::new(self.dial_model, 0) };
+        queue.write_buffer(&self.dial.instances, 0, bytemuck::bytes_of(&dial));
+    }
+
+    fn draws(&self) -> [&Draw; 4] {
+        [&self.post, &self.rim, &self.dial, &self.ink]
+    }
+}
+
+/// The face's glow: brighter after sunset like a lit street clock, and a little by day too (it
+/// faces away from the sun); dimmed by the fog.
+fn dial_glow(sky: &SkyState) -> f32 {
+    ((0.25 + 0.25 * (1.0 - sky.daylight)) * (1.0 - 0.6 * sky.fog)) as f32
 }
 
 // Art-resolution targets, rebuilt with the post bind group that reads them.
@@ -153,6 +235,9 @@ pub struct Renderer {
     firefly_draw: Draw, // after everything opaque, with no depth or normal writes
     glow_pipeline: wgpu::RenderPipeline,
     unlit_pipeline: wgpu::RenderPipeline,
+    dial_pipeline: wgpu::RenderPipeline,
+    post_clock: PostClock,
+    pub show_clock: bool,
     targets: Targets,
     pixel_size: u32,
 }
@@ -432,6 +517,7 @@ impl Renderer {
         let water_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_water"), &BUFFERS, Some(wgpu::Face::Back));
         let insect_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_insect"), &BUFFERS, None);
         let unlit_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_unlit"), &BUFFERS, Some(wgpu::Face::Back));
+        let dial_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_dial"), &BUFFERS, Some(wgpu::Face::Back));
         let glow_pipeline = overlay_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_unlit"), &BUFFERS, Some(wgpu::Face::Back), true);
         // No culling: a blade faces the camera, and the wind keeps its tip in that plane.
         let grass_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_grass", "fs_grass"), &grass::BUFFERS, None);
@@ -506,6 +592,9 @@ impl Renderer {
             fireflies,
             glow_pipeline,
             unlit_pipeline,
+            dial_pipeline,
+            post_clock: PostClock::new(device),
+            show_clock: true,
             targets,
             pixel_size,
         };
@@ -546,6 +635,11 @@ impl Renderer {
         // White lerped 10% toward the sky, as the web's water material.
         self.globals.water_tint = Vec3::ONE.lerp(self.background, 0.1).extend(0.0).into();
         self.globals.fog = vec3(sky.fog_color).extend(sky.fog as f32).into();
+    }
+
+    /// Takes effect with the next resize.
+    pub fn set_pixel_size(&mut self, pixel_size: u32) {
+        self.pixel_size = pixel_size;
     }
 
     /// New window size (never 0): rebuilds the art targets, the post bind group and the camera together.
@@ -610,11 +704,15 @@ impl Renderer {
         queue.write_buffer(&self.firefly_draw.instances, 0, bytemuck::cast_slice(&specks));
     }
 
-    /// One frame at animation time `time` (s), `dt` after the last drawn one.
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f64, dt: f64, sky: &SkyState) {
+    /// One frame at animation time `time` (s), `dt` after the last drawn one, the post clock's
+    /// hands at `hands` (sky_clock::SkyClock::hands).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f64, dt: f64, sky: &SkyState, hands: (f64, f64)) {
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
+        self.post_clock.pose(queue, hands, sky);
         self.globals.params[0] = time as f32;
+        self.globals.params[1] = dial_glow(sky);
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         let mut encoder = device.create_command_encoder(&Default::default());
         let depth_attachment = |view| {
@@ -653,7 +751,8 @@ impl Renderer {
             });
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &self.globals_group, &[]);
-            for d in self.draws.iter().filter(|d| d.casts_shadow) {
+            let post_clock = self.show_clock.then(|| self.post_clock.draws()).into_iter().flatten();
+            for d in self.draws.iter().chain(post_clock).filter(|d| d.casts_shadow) {
                 draw(&mut pass, d);
             }
         }
@@ -674,13 +773,15 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_group, &[]);
             pass.set_bind_group(1, &self.shadow_group, &[]);
             let insects = [&self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
-            for d in self.draws.iter().chain(insects) {
+            let post_clock = self.show_clock.then(|| self.post_clock.draws()).into_iter().flatten();
+            for d in self.draws.iter().chain(post_clock).chain(insects) {
                 pass.set_pipeline(match d.shade {
                     Shade::Toon => &self.toon_pipeline,
                     Shade::Ground => &self.ground_pipeline,
                     Shade::Water => &self.water_pipeline,
                     Shade::Insect => &self.insect_pipeline,
                     Shade::Unlit => &self.unlit_pipeline,
+                    Shade::Dial => &self.dial_pipeline,
                 });
                 draw(&mut pass, d);
             }
