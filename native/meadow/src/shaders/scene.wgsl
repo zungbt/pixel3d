@@ -112,6 +112,13 @@ fn fs_insect(in: VertexOut, @builtin(front_facing) front: bool) -> SceneOut {
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 
+// Unlit, as the web's MeshBasicMaterial: the gnats, and the fireflies (whose pipeline writes no
+// depth or normals, so they never get outlines).
+@fragment
+fn fs_unlit(in: VertexOut) -> SceneOut {
+    return SceneOut(vec4f(in.color, 1.0), view_normal(normalize(in.normal)));
+}
+
 // Path constants: meadow_core::world::path (filled in by render.rs).
 fn on_path(x: f32, z: f32) -> bool {
     let a = z * PATH_FREQ + PATH_PHASE;

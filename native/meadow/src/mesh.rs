@@ -137,7 +137,7 @@ pub fn cube() -> MeshData {
     MeshData { vertices, indices }
 }
 
-/// A butterfly's right wing at unit size: flat, facing up, hinged on the z axis and reaching out
+/// An insect's right wing at unit size: flat, facing up, hinged on the z axis and reaching out
 /// along +x (three's PlaneGeometry turned flat and shifted half its width).
 pub fn wing() -> MeshData {
     let up = [0.0, 1.0, 0.0];
