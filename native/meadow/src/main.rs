@@ -269,7 +269,11 @@ fn log_file() -> Option<std::fs::File> {
 }
 
 fn settings_text() -> Option<String> {
-    std::fs::read_to_string(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("pixel3d").join("settings.txt")).ok()
+    let path = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("pixel3d").join("settings.txt");
+    sky_clock::read_settings(&path).unwrap_or_else(|e| {
+        log::warn!("{e}; using the zone guess");
+        None
+    })
 }
 
 fn main() {

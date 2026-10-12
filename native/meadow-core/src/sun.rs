@@ -107,7 +107,7 @@ pub fn winterness(date: Date, lat: f64) -> f64 {
 /// The `place = lat, lon` line of settings.txt (degrees, north and east positive). Ok(None): no
 /// such line. Err: a line that can't be used, with a message for the log. Never panics.
 pub fn parse_place(settings: &str) -> Result<Option<(f64, f64)>, String> {
-    let line = settings.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == "place"));
+    let line = settings.trim_start_matches('\u{feff}').lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == "place"));
     let Some((_, value)) = line else { return Ok(None) };
     let value = value.trim();
     let bad = || format!("place = {value:?}: expected `lat, lon` in degrees, like `21.03, 105.85`");
@@ -174,6 +174,7 @@ mod tests {
         assert_eq!(parse_place("place = -33.87, 151.2"), Ok(Some((-33.87, 151.2))));
         assert_eq!(parse_place("# place = 1, 2\nfps = 15"), Ok(None), "a comment is not a setting");
         assert_eq!(parse_place(""), Ok(None));
+        assert_eq!(parse_place("\u{feff}place = 10.8, 106.7\r\n"), Ok(Some((10.8, 106.7))), "Notepad's UTF-8 BOM and CRLF");
         for bad in ["place = 21.03", "place = hanoi", "place = 91, 0", "place = 0, 181", "place = NaN, 0", "place = 21.03, 105.85, 3", "place ="] {
             assert!(parse_place(bad).is_err(), "{bad} should be rejected");
         }

@@ -53,12 +53,45 @@ fn hhmm(hour: f64) -> String {
     format!("{:02}:{:02}", m / 60, m % 60)
 }
 
+/// Without a named zone the hour still follows the PC clock (the offset as of startup).
+fn fallback_zone(os_offset_min: Option<i32>) -> TimeZone {
+    os_offset_min.and_then(|m| jiff::tz::Offset::from_seconds(m * 60).ok()).map_or(TimeZone::UTC, TimeZone::fixed)
+}
+
+#[cfg(windows)]
+fn os_offset_min() -> Option<i32> {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION};
+    let mut info = TIME_ZONE_INFORMATION::default();
+    let id = unsafe { GetTimeZoneInformation(&mut info) };
+    // UTC = local + bias; id 2 is TIME_ZONE_ID_DAYLIGHT.
+    let bias = match id {
+        TIME_ZONE_ID_INVALID => return None,
+        2 => info.Bias + info.DaylightBias,
+        _ => info.Bias + info.StandardBias,
+    };
+    Some(-bias)
+}
+
+#[cfg(not(windows))]
+fn os_offset_min() -> Option<i32> {
+    None
+}
+
+/// The text of settings.txt; no file is fine, but an unreadable one (e.g. UTF-16) is an error to log.
+pub fn read_settings(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e} (save it as UTF-8)", path.display())),
+    }
+}
+
 impl SkyClock {
     /// `settings`: the text of %APPDATA%\pixel3d\settings.txt, if there is one.
     pub fn new(mode: Mode, settings: Option<&str>) -> Self {
         let tz = TimeZone::try_system().unwrap_or_else(|e| {
-            log::warn!("sky: no system time zone ({e}), using UTC");
-            TimeZone::UTC
+            log::warn!("sky: no system time zone ({e}), using the OS's current UTC offset");
+            fallback_zone(os_offset_min())
         });
         let now = now(&tz);
         let zone = tz.iana_name();
@@ -132,5 +165,27 @@ mod tests {
         assert_eq!(hhmm(5.68), "05:41");
         assert_eq!(hhmm(17.999), "18:00");
         assert_eq!(hhmm(23.999), "00:00");
+    }
+
+    #[test]
+    fn an_unknown_zone_keeps_the_os_offset() {
+        let tz = fallback_zone(Some(420));
+        assert_eq!(tz.iana_name(), None, "logged as unknown, place from the offset");
+        assert_eq!(tz.to_offset(Timestamp::now()).seconds(), 420 * 60);
+        assert_eq!(fallback_zone(None).iana_name(), Some("UTC"));
+    }
+
+    #[test]
+    fn only_a_missing_settings_file_is_silent() {
+        let dir = std::env::temp_dir().join(format!("meadow-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        assert_eq!(read_settings(&path), Ok(None));
+        std::fs::write(&path, "place = 10.8, 106.7\n").unwrap();
+        assert_eq!(read_settings(&path), Ok(Some("place = 10.8, 106.7\n".to_string())));
+        // Windows PowerShell 5.1's `>` writes UTF-16LE: that must be a warning, not a silent zone guess.
+        std::fs::write(&path, b"\xff\xfep\0l\0a\0c\0e\0").unwrap();
+        assert!(read_settings(&path).unwrap_err().contains("UTF-8"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
