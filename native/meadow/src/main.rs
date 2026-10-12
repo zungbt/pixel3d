@@ -123,6 +123,12 @@ impl App {
         }
         desktop.next_check = now + wallpaper::CHECK_EVERY;
         let (next, fallback) = (desktop.next_check, desktop.fallback);
+        // An Explorer restart destroys our window with the desktop, but winit sends no Destroyed.
+        if self.gpu.is_some() && !fallback && !desktop.attached() {
+            log::warn!("desktop gone (Explorer restarted?): reopening");
+            self.gpu = None;
+            desktop.lost();
+        }
         if self.gpu.is_none() {
             self.open(event_loop);
             return Some(next);
@@ -161,13 +167,17 @@ impl ApplicationHandler<UserEvent> for App {
     #[cfg(windows)]
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         if self.desktop.as_ref().is_some_and(|desktop| desktop.menu(&event)) {
+            log::info!("tray: exit");
             event_loop.exit();
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                log::info!("close requested: exiting");
+                event_loop.exit();
+            }
             // Wallpaper mode: an Explorer restart takes our window down with the desktop; the
             // next check opens a new one.
             #[cfg(windows)]
@@ -306,4 +316,5 @@ fn main() {
         desktop: wallpaper.then(wallpaper::Desktop::new),
     };
     event_loop.run_app(&mut app).expect("event loop");
+    log::info!("event loop ended");
 }
