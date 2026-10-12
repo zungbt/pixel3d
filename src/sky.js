@@ -3,6 +3,7 @@ import { NOISE_GLSL } from './world.js';
 
 export const DAY_LENGTH = 300; // seconds for a full day-night cycle
 const DAY_START = 0.08; // fraction of the cycle at t = 0 (early morning)
+export const NOON = (0.25 - DAY_START) * DAY_LENGTH; // sky time with the sun at its highest
 
 // Clock hour <-> sky phase, for a day with sunrise and sunset at sun.rise and sun.set (sunTimes):
 // the day maps onto phase 0 -> 0.5 and the night onto 0.5 -> 1, each at an even pace.
@@ -110,14 +111,17 @@ function addCloudShadow(material) {
   };
 }
 
-// Call after everything that should receive cloud shadows is in the scene.
-export function buildSky(scene) {
-  // Collect first: a material shared by several meshes must be wrapped only once.
-  const materials = new Set();
-  scene.traverse((obj) => {
-    if (obj.material?.isMeshToonMaterial) materials.add(obj.material);
-  });
-  materials.forEach(addCloudShadow);
+// Call after everything that should receive cloud shadows is in the scene. clouds: false leaves
+// the materials unpatched: no cloud shadows and no ground fog.
+export function buildSky(scene, { clouds = true } = {}) {
+  if (clouds) {
+    // Collect first: a material shared by several meshes must be wrapped only once.
+    const materials = new Set();
+    scene.traverse((obj) => {
+      if (obj.material?.isMeshToonMaterial) materials.add(obj.material);
+    });
+    materials.forEach(addCloudShadow);
+  }
 
   const hemi = new THREE.HemisphereLight(HEMI_DAY, 0x3a3326, 1.2);
   scene.add(hemi);
