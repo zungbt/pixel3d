@@ -95,3 +95,13 @@ Findings:
 - Validation is off in release (`InstanceFlags::from_build_config()` only sets `VALIDATION_INDIRECT_CALL`; we draw nothing indirect). Debug builds — `run.sh` without `--release` — run full validation, so never measure them.
 - At a 60 fps cap Vulkan delivers 54–58 fps while DX12 holds 59–60: the `WaitUntil` deadline sometimes lands just after a vsync under Fifo. Irrelevant for the wallpaper's 15 fps; worth a look only if a 60 fps mode matters.
 
+
+### App polish (sub-project 5)
+
+Release exe with `lto = true, strip = true`: 7,339,520 bytes (15,395,491 before). Quick reads ~8 s after start, window 1920×1080, Vulkan (not the 60 s measurement):
+
+| exe | scene | working set (MB) | private (MB) |
+|---|---|---|---|
+| SP4b | noon, pixel size 2 | 188 | 113 |
+| SP5 | noon, pixel size 2, post clock | 172–185 | 113–114 |
+| SP5 | dusk cycle, pixel size 4, fog always, clock hidden | 155 | 96 |
