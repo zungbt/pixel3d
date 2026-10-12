@@ -9,6 +9,7 @@ use meadow_core::world;
 use wgpu::util::DeviceExt;
 
 use crate::camera;
+use crate::grass::{self, Grass};
 use crate::mesh::{self, MeshData, Vertex};
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -118,11 +119,13 @@ pub struct Renderer {
     toon_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    grass_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     post_buf: wgpu::Buffer,
     manual_srgb: bool,
     draws: Vec<Draw>,
+    grass: Grass,
     targets: Targets,
     pixel_size: u32,
 }
@@ -146,6 +149,8 @@ fn prelude() -> String {
         ("BRANCH_X1", BRANCH_X1),
         ("BRANCH_TAPER", BRANCH_TAPER),
         ("BRANCH_WIDTH", BRANCH_WIDTH),
+        ("BLADE_W", grass::BLADE_W),
+        ("BLADE_H", grass::BLADE_H),
     ];
     let mut s = String::new();
     for (name, v) in consts {
@@ -213,13 +218,20 @@ fn depth_state(format: wgpu::TextureFormat) -> wgpu::DepthStencilState {
     }
 }
 
-fn scene_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, fs: &str) -> wgpu::RenderPipeline {
+fn scene_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    (vs, fs): (&str, &str),
+    buffers: &[Option<wgpu::VertexBufferLayout>],
+    cull_mode: Option<wgpu::Face>,
+) -> wgpu::RenderPipeline {
     let target = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(fs),
         layout: Some(layout),
-        vertex: wgpu::VertexState { module, entry_point: Some("vs_scene"), compilation_options: Default::default(), buffers: &BUFFERS },
-        primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+        vertex: wgpu::VertexState { module, entry_point: Some(vs), compilation_options: Default::default(), buffers },
+        primitive: wgpu::PrimitiveState { cull_mode, ..Default::default() },
         depth_stencil: Some(depth_state(DEPTH_FORMAT)),
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
@@ -247,8 +259,7 @@ fn upload(device: &wgpu::Device, mesh: MeshData, instances: &[Instance], shade: 
 }
 
 // Every mesh in the meadow, as instanced draws.
-fn build_draws(device: &wgpu::Device) -> Vec<Draw> {
-    let layout = world::place(42);
+fn build_draws(device: &wgpu::Device, layout: &world::Layout) -> Vec<Draw> {
     log::info!("layout: {} trees, {} rocks", layout.trees.len(), layout.rocks.len());
     let pond = |lift: f64| Mat4::from_translation(Vec3::new(world::POND_X as f32, (world::shore_y() + lift) as f32, world::POND_Z as f32));
     let at = |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
@@ -367,9 +378,11 @@ impl Renderer {
             cache: None,
         });
         let scene_layout = pipeline_layout("scene", &[Some(&globals_layout), Some(&shadow_layout)]);
-        let toon_pipeline = scene_pipeline(device, &scene_layout, &scene_module, "fs_toon");
-        let ground_pipeline = scene_pipeline(device, &scene_layout, &scene_module, "fs_ground");
-        let water_pipeline = scene_pipeline(device, &scene_layout, &scene_module, "fs_water");
+        let toon_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_toon"), &BUFFERS, Some(wgpu::Face::Back));
+        let ground_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_ground"), &BUFFERS, Some(wgpu::Face::Back));
+        let water_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_water"), &BUFFERS, Some(wgpu::Face::Back));
+        // No culling: a blade faces the camera, and the wind keeps its tip in that plane.
+        let grass_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_grass", "fs_grass"), &grass::BUFFERS, None);
         let post_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("post"),
             layout: Some(&pipeline_layout("post", &[Some(&post_layout)])),
@@ -406,6 +419,8 @@ impl Renderer {
             water_tint: Vec3::ONE.lerp(linear(BACKGROUND), 0.1).extend(0.0).into(),
             params: [0.0; 4],
         };
+        // Placed once: the trees and rocks also thin the grass.
+        let world_layout = world::place(42);
         let targets = Self::targets(device, &post_layout, &post_buf, art_size(width, height, pixel_size));
         let mut renderer = Self {
             globals,
@@ -417,11 +432,13 @@ impl Renderer {
             toon_pipeline,
             ground_pipeline,
             water_pipeline,
+            grass_pipeline,
             post_pipeline,
             post_layout,
             post_buf,
             manual_srgb: !surface_format.is_srgb(),
-            draws: build_draws(device),
+            draws: build_draws(device, &world_layout),
+            grass: Grass::new(device, &world_layout),
             targets,
             pixel_size,
         };
@@ -528,6 +545,9 @@ impl Renderer {
                 });
                 draw(&mut pass, d);
             }
+            pass.set_pipeline(&self.grass_pipeline);
+            pass.set_vertex_buffer(0, self.grass.instances.slice(..));
+            pass.draw(0..3, 0..self.grass.count);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

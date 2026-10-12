@@ -148,3 +148,52 @@ fn fs_water(in: VertexOut) -> SceneOut {
     let color = lighting(g.water_tint.rgb * water, n, toon(dot(n, g.sun_dir.xyz)), lit);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
+
+// Grass: one triangle per blade, built from the vertex index (no vertex buffer). BLADE_W and
+// BLADE_H: filled in by render.rs.
+struct GrassIn {
+    @builtin(vertex_index) corner: u32,
+    @location(0) pos: vec3f,         // base, on the ground
+    @location(1) color_scale: vec4f, // linear rgb, (scale - 0.7) / 0.6
+    @location(2) normal: vec4f,      // the ground's normal at the base
+}
+
+struct GrassOut {
+    @builtin(position) clip: vec4f,
+    @location(0) world: vec3f,
+    @location(1) color: vec3f,
+    @location(2) ground_normal: vec3f,
+}
+
+@vertex
+fn vs_grass(v: GrassIn) -> GrassOut {
+    // Corners (±w/2, 0) and (0, h) in the blade's plane, turned to face the camera (yaw π/4).
+    var local = vec3f(0.0, BLADE_H, 0.0);
+    if v.corner < 2u {
+        let x = select(-0.5, 0.5, v.corner == 1u) * BLADE_W;
+        local = vec3f(x * 0.7071, 0.0, -x * 0.7071);
+    }
+    // Travelling gust keyed on the base, tip only, in local space before the scale (as the web).
+    let tip = local.y / BLADE_H;
+    let t = g.params.x;
+    var sway = sin(t * 1.6 - (v.pos.x + v.pos.z) * 0.45) * 0.5 + 0.5;
+    sway = sway * 0.12 + sin(t * 3.1 + v.pos.x * 2.0) * 0.02;
+    local += vec3f(0.7071, 0.0, -0.7071) * sway * tip;
+    let world = v.pos + local * (0.7 + 0.6 * v.color_scale.a);
+    var out: GrassOut;
+    out.clip = g.view_proj * vec4f(world, 1.0);
+    out.world = world;
+    out.color = v.color_scale.rgb * mix(0.85, 1.12, tip); // darker at the root (linear in tip: exact per vertex)
+    out.ground_normal = v.normal.xyz;
+    return out;
+}
+
+// Lit as flat ground (normal up, as the web), but outlined with the ground's own normal, so a blade
+// on a slope doesn't read as an edge against the ground behind it.
+@fragment
+fn fs_grass(in: GrassOut) -> SceneOut {
+    let up = vec3f(0.0, 1.0, 0.0);
+    let lit = shadow(in.world, up);
+    let color = lighting(in.color, up, toon(dot(up, g.sun_dir.xyz)), lit);
+    return SceneOut(vec4f(color, 1.0), view_normal(in.ground_normal));
+}
