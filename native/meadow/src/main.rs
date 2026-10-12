@@ -77,21 +77,22 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
         let time = self.time + dt;
+        // Stepped on a copy, kept only if the frame is drawn (as `time`): a skipped frame's dt
+        // comes round again with the next one.
         let unix = unix_now();
-        if let Some((every, next)) = self.toggle_clock.as_mut()
-            && time >= *next
-        {
-            *next += *every;
-            self.wreck.set(!self.wreck.broken(), unix);
+        let mut wreck = self.wreck.clone();
+        let toggle = self.toggle_clock.is_some_and(|(_, next)| time >= next);
+        if toggle {
+            wreck.set(!wreck.broken(), unix);
         }
-        self.wreck.update(dt, unix);
+        wreck.update(dt, unix);
         let sky = self.sky.state(time);
         let clock = ClockPose {
-            hands: self.sky.hands(self.wreck.behind(unix)),
-            fallen: self.wreck.progress(),
-            shiver: self.wreck.shiver(),
-            weathering: self.wreck.weathering(unix),
-            glow: self.wreck.glow(),
+            hands: self.sky.hands(wreck.behind(unix)),
+            fallen: wreck.progress(),
+            shiver: wreck.shiver(),
+            weathering: wreck.weathering(unix),
+            glow: wreck.glow(),
         };
         match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, dt, &sky, &clock)) {
             Frame::Occluded => {
@@ -106,6 +107,10 @@ impl App {
             Frame::Drawn => {}
         }
         self.time += dt;
+        self.wreck = wreck;
+        if let Some((every, next)) = self.toggle_clock.as_mut().filter(|_| toggle) {
+            *next += *every;
+        }
         self.last_frame = Some(now);
         if self.retry_at.take().is_some() {
             log::info!("visible again");
@@ -385,7 +390,10 @@ fn main() {
         (false, None) if settings.clock => sky_clock::Mode::Clock,
         (false, None) => sky_clock::Mode::Cycle(None),
     };
-    settings.clock = mode == sky_clock::Mode::Clock;
+    // --hour pins the sky for this run only: the tray still shows the saved choice.
+    if !matches!(mode, sky_clock::Mode::Hour(_)) {
+        settings.clock = mode == sky_clock::Mode::Clock;
+    }
     let toggle_clock = arg(&args, "--toggle-clock").map(|v| v.parse().ok().filter(|s: &f64| *s > 0.0).unwrap_or_else(|| panic!("--toggle-clock must be seconds, like 8, got {v}")));
     log::info!("settings: {settings:?}");
 
