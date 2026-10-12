@@ -2,4 +2,6 @@
 pub mod frame_pacer;
 pub mod grass;
 pub mod rng;
+pub mod sky;
+pub mod sun;
 pub mod world;
