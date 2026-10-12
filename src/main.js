@@ -4,7 +4,7 @@ import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelated
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildWorld } from './world.js';
 import { addWind, buildGrass } from './grass.js';
-import { buildSky, clockTime, DAY_LENGTH, hourToPhase, phaseToHour } from './sky.js';
+import { buildSky, clockTime, DAY_LENGTH, hourToPhase, NOON, phaseToHour } from './sky.js';
 import { sunTimes, viewerPlace, winterness } from './sun.js';
 import { buildFlowers } from './flowers.js';
 import { buildInsects } from './insects.js';
@@ -19,6 +19,11 @@ const params = new URLSearchParams(location.search);
 const wallpaper = params.has('wallpaper');
 const settings = loadSettings();
 if (wallpaper) Object.assign(settings, { fps: 15, clock: true, hideHud: true });
+// Reference mode (?ref, dev only): the scene the native port draws, for side-by-side checks:
+// no grass, flowers, insects, post clock, clouds or fog, the sun fixed at noon and no HUD.
+// &px=N sets the pixel size for this page only.
+const ref = params.has('ref');
+if (params.has('px')) settings.pixelSize = parseSetting('pixelSize', params.get('px'));
 
 const VIEW_HEIGHT = 18; // world units visible vertically
 // Every pass renders at art resolution; the canvas is stretched to the window with
@@ -43,11 +48,11 @@ renderer.domElement.addEventListener('webglcontextlost', () => location.reload()
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x151729);
 const world = buildWorld(scene);
-const grass = buildGrass(scene, world);
-const flowers = buildFlowers(scene, world);
-const insects = buildInsects(scene, world, flowers);
-const clock = buildClock(scene, world);
-const sky = buildSky(scene); // last: patches cloud shadows into every toon material above
+const grass = ref ? null : buildGrass(scene, world);
+const flowers = ref ? null : buildFlowers(scene, world);
+const insects = ref ? null : buildInsects(scene, world, flowers);
+const clock = ref ? null : buildClock(scene, world);
+const sky = buildSky(scene, { clouds: !ref }); // last: patches cloud shadows into every toon material above
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 const yaw = Math.PI / 4;
@@ -67,7 +72,7 @@ function updateFrustum() {
   camera.left = (-VIEW_HEIGHT / 2) * aspect;
   camera.right = (VIEW_HEIGHT / 2) * aspect;
   camera.updateProjectionMatrix();
-  grass.fitView(camera);
+  grass?.fitView(camera);
 }
 updateFrustum();
 
@@ -118,7 +123,7 @@ form.showClock.checked = settings.showClock;
 function applyHud() {
   hud.classList.toggle('bare', settings.hideHud);
   timeInput.disabled = settings.clock; // the slider still shows the clock's time
-  clock.object.visible = settings.showClock;
+  if (clock) clock.object.visible = settings.showClock;
 }
 applyHud();
 document.querySelector('#gear').addEventListener('click', () => (form.hidden = !form.hidden));
@@ -133,7 +138,7 @@ form.addEventListener('change', ({ target }) => {
   if (target.name === 'pixelSize') resize();
   applyHud();
 });
-if (wallpaper) hud.style.display = 'none';
+if (wallpaper || ref) hud.style.display = 'none';
 const shouldRender = createFrameLimiter();
 
 const bench = params.has('bench')
@@ -152,18 +157,20 @@ renderer.setAnimationLoop((ms) => {
   bench?.begin();
   world.update(t);
   bench?.mark('world');
-  grass.update(t);
+  grass?.update(t);
   bench?.mark('grass');
   const now = new Date();
   sun = sunTimes(now, place);
-  sky.update(t + skyOffset, settings.clock ? clockTime(now, sun) : t + skyOffset, {
-    mode: settings.fog,
-    winter: winterness(now, place[0]),
-  });
+  if (ref) sky.update(t, NOON);
+  else
+    sky.update(t + skyOffset, settings.clock ? clockTime(now, sun) : t + skyOffset, {
+      mode: settings.fog,
+      winter: winterness(now, place[0]),
+    });
   bench?.mark('sky');
-  insects.update(t, dt, sky.state); // after the sky, so its state is this frame's
+  insects?.update(t, dt, sky.state); // after the sky, so its state is this frame's
   bench?.mark('insects');
-  clock.update(now, sky.state);
+  clock?.update(now, sky.state);
   const hour = phaseToHour(sky.state.phase, sun);
   timeInput.value = hour;
   timeLabel.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
