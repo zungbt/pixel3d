@@ -7,7 +7,9 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
-use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, ScreenToClient};
+use windows_sys::Win32::Graphics::Gdi::{
+    BLACK_BRUSH, GetStockObject, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromWindow, ScreenToClient,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -189,7 +191,8 @@ pub fn trim_memory() {
     unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
 }
 
-/// True when a maximised window, or a fullscreen foreground one, hides the desktop.
+/// True when a maximised window, or a fullscreen foreground one, hides the desktop on the primary
+/// screen (the only one the meadow covers).
 pub fn desktop_covered() -> bool {
     let mut covered = false;
     unsafe { EnumWindows(Some(check_covering), &mut covered as *mut bool as LPARAM) };
@@ -199,6 +202,10 @@ pub fn desktop_covered() -> bool {
 unsafe extern "system" fn check_covering(hwnd: HWND, out: LPARAM) -> BOOL {
     unsafe {
         if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || cloaked(hwnd) || is_shell(hwnd) {
+            return 1;
+        }
+        // A window maximised on another monitor doesn't hide the meadow.
+        if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) {
             return 1;
         }
         let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };

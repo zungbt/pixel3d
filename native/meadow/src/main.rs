@@ -1,6 +1,9 @@
-// The meadow at noon: ground, paths, pond, trees and rocks, toon-lit with pixel outlines.
-// Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 3),
-// --wallpaper (Windows: behind the desktop icons, with a tray menu).
+// The meadow: ground, paths, pond, trees, rocks and grass, toon-lit with pixel outlines, at the
+// PC's local time of day. Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync),
+// --pixel-size 2|3|4 (default 3), --wallpaper (Windows: behind the desktop icons, with a tray
+// menu), --hour H (pin the sky at local hour H, 0-24, e.g. 18.5), --cycle (the web's 300 s day,
+// from --hour or the clock). %APPDATA%\pixel3d\settings.txt: `place = lat, lon` overrides the
+// place guessed from the time zone (sunrise and sunset).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -9,6 +12,7 @@ mod gpu;
 mod grass;
 mod mesh;
 mod render;
+mod sky_clock;
 #[cfg(windows)]
 mod wallpaper;
 
@@ -47,6 +51,7 @@ struct App {
     retry_at: Option<Instant>, // set while the surface is occluded
     last_frame: Option<Instant>,
     time: f64, // animation clock, s
+    sky: sky_clock::SkyClock,
     frames: u32,
     window_start: Instant,
     #[cfg(windows)]
@@ -67,7 +72,8 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
         let time = (self.time + dt) as f32;
-        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time)) {
+        let sky = self.sky.state(self.time + dt);
+        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, &sky)) {
             Frame::Occluded => {
                 if self.retry_at.is_none() {
                     log::info!("occluded: pausing");
@@ -262,6 +268,14 @@ fn log_file() -> Option<std::fs::File> {
     std::fs::File::create(dir.join("log.txt")).ok()
 }
 
+fn settings_text() -> Option<String> {
+    let path = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("pixel3d").join("settings.txt");
+    sky_clock::read_settings(&path).unwrap_or_else(|e| {
+        log::warn!("{e}; using the zone guess");
+        None
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let wallpaper = args.iter().any(|a| a == "--wallpaper");
@@ -288,6 +302,8 @@ fn main() {
         None => 3,
         Some(v) => v.parse().ok().filter(|n| (2..=4).contains(n)).unwrap_or_else(|| panic!("--pixel-size must be 2, 3 or 4, got {v}")),
     };
+    let hour = arg(&args, "--hour").map(|v| v.parse().ok().filter(|h: &f64| (0.0..=24.0).contains(h)).unwrap_or_else(|| panic!("--hour must be 0 to 24, like 18.5, got {v}")));
+    let mode = if args.iter().any(|a| a == "--cycle") { sky_clock::Mode::Cycle(hour) } else { hour.map_or(sky_clock::Mode::Clock, sky_clock::Mode::Hour) };
     log::info!("fps cap: {}, pixel size {pixel_size}", fps.map_or("none (vsync)".into(), |f| f.to_string()));
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
@@ -311,6 +327,7 @@ fn main() {
         retry_at: None,
         last_frame: None,
         time: 0.0,
+        sky: sky_clock::SkyClock::new(mode, settings_text().as_deref()),
         frames: 0,
         window_start: now,
         #[cfg(windows)]

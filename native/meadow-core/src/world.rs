@@ -31,7 +31,7 @@ pub fn smoothstep(x: f64, min: f64, max: f64) -> f64 {
 }
 
 // three's MathUtils.lerp form, so t = 1 gives exactly b (flat ground is exactly SHORE_Y).
-pub(crate) fn lerp(a: f64, b: f64, t: f64) -> f64 {
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
     (1.0 - t) * a + t * b
 }
 

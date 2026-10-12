@@ -68,10 +68,12 @@ fn shadow(world: vec3f, normal: vec3f) -> f32 {
     return select(1.0, lit / 5.0, inside);
 }
 
-// Sun through the toon ramp and shadow, plus the sky/ground hemisphere light (Lambert, /π).
-fn lighting(diffuse: vec3f, normal: vec3f, ramp: f32, lit: f32) -> vec3f {
+// Sun (or moon) through the toon ramp, shadow and cloud shade, plus the sky/ground hemisphere light
+// (Lambert, /π); then the ground fog over it, as the web's patched toon material.
+fn lighting(diffuse: vec3f, normal: vec3f, ramp: f32, lit: f32, world: vec3f) -> vec3f {
     let hemi = mix(g.hemi_ground.rgb, g.hemi_sky.rgb, normal.y * 0.5 + 0.5);
-    return diffuse / PI * (g.sun_color.rgb * ramp * lit + hemi);
+    let color = diffuse / PI * (g.sun_color.rgb * ramp * lit * cloud_shade(world) + hemi);
+    return mix(color, g.fog.rgb, ground_fog(world));
 }
 
 fn view_normal(n: vec3f) -> vec4f {
@@ -82,7 +84,7 @@ fn view_normal(n: vec3f) -> vec4f {
 fn fs_toon(in: VertexOut) -> SceneOut {
     let n = normalize(in.normal);
     let lit = shadow(in.world, n);
-    let color = lighting(in.color, n, toon(dot(n, g.sun_dir.xyz)), lit);
+    let color = lighting(in.color, n, toon(dot(n, g.sun_dir.xyz)), lit, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 
@@ -114,7 +116,7 @@ fn fs_ground(in: VertexOut) -> SceneOut {
         base = PATH_COLOR;
     }
     let lit = shadow(in.world, n);
-    let color = lighting(base * in.extra, n, toon_soft(dot(n, g.sun_dir.xyz)), lit);
+    let color = lighting(base * in.extra, n, toon_soft(dot(n, g.sun_dir.xyz)), lit, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 
@@ -145,7 +147,7 @@ fn fs_water(in: VertexOut) -> SceneOut {
     }
     let n = vec3f(0.0, 1.0, 0.0);
     let lit = shadow(in.world, n);
-    let color = lighting(g.water_tint.rgb * water, n, toon(dot(n, g.sun_dir.xyz)), lit);
+    let color = lighting(g.water_tint.rgb * water, n, toon(dot(n, g.sun_dir.xyz)), lit, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 
@@ -194,6 +196,6 @@ fn vs_grass(v: GrassIn) -> GrassOut {
 fn fs_grass(in: GrassOut) -> SceneOut {
     let up = vec3f(0.0, 1.0, 0.0);
     let lit = shadow(in.world, up);
-    let color = lighting(in.color, up, toon(dot(up, g.sun_dir.xyz)), lit);
+    let color = lighting(in.color, up, toon(dot(up, g.sun_dir.xyz)), lit, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(in.ground_normal));
 }

@@ -13,11 +13,14 @@ env_logger = { version = "0.11", default-features = false, features = ["humantim
 glam = "0.34.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 meadow-core = { version = "0.1.0", path = "../meadow-core" }
+# The system time zone (Windows zone → IANA via CLDR) and local time, DST included. Default
+# features: on Windows that bundles the tzdb (~100–200 KB of exe).
+jiff = "0.2"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
 
 # Wallpaper mode (desktop attach, tray menu, autostart): Windows only, so `cargo test` stays a plain Linux build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Security", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Time"] }
 tray-icon = { version = "0.26", default-features = false }
