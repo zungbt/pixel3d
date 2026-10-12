@@ -23,7 +23,7 @@ struct VertexIn {
     @location(4) m1: vec4f,
     @location(5) m2: vec4f,
     @location(6) m3: vec4f,
-    @location(7) base: vec4f,  // xyz: tree base (sway pivot), w: sway phase, < 0 for no sway
+    @location(7) base: vec4f,  // xyz: tree base (sway pivot), w: sway phase, < 0 for no sway (-2: in the grass wind, scene.wgsl)
     @location(8) color: vec4f, // linear rgb
 }
 

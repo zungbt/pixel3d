@@ -12,10 +12,25 @@ struct VertexOut {
     @location(4) color: vec3f,
 }
 
+// The grass's travelling gust at time t for something rooted at base: the tip's offset at
+// BLADE_H (meadow_core::flight::wind_sway, which the perched insects follow).
+fn gust(t: f32, base: vec2f) -> vec3f {
+    var sway = sin(t * 1.6 - (base.x + base.y) * 0.45) * 0.5 + 0.5;
+    sway = sway * 0.12 + sin(t * 3.1 + base.x * 2.0) * 0.02;
+    return vec3f(0.7071, 0.0, -0.7071) * sway;
+}
+
+// Instance base.w for meshes in the grass's wind (the flowers): unrotated, unit scale, keyed on
+// their translation, sheared by mesh-local height. Normals stay put, as the web's.
+const IN_WIND: f32 = -2.0;
+
 @vertex
 fn vs_scene(v: VertexIn) -> VertexOut {
     let m = model_matrix(v);
-    let world = m * vec4f(v.pos, 1.0);
+    var world = m * vec4f(v.pos, 1.0);
+    if v.base.w == IN_WIND {
+        world += vec4f(gust(g.params.x, m[3].xz) * (v.pos.y / BLADE_H), 0.0);
+    }
     var out: VertexOut;
     out.clip = g.view_proj * world;
     out.world = world.xyz;
@@ -85,6 +100,15 @@ fn fs_toon(in: VertexOut) -> SceneOut {
     let n = normalize(in.normal);
     let lit = shadow(in.world, n);
     let color = lighting(in.color, n, toon(dot(n, g.sun_dir.xyz)), lit, in.world);
+    return SceneOut(vec4f(color, 1.0), view_normal(n));
+}
+
+// Insects: two-sided (a wing's back face is lit with the normal flipped) and, as the web's, not
+// shadowed.
+@fragment
+fn fs_insect(in: VertexOut, @builtin(front_facing) front: bool) -> SceneOut {
+    let n = normalize(in.normal) * select(-1.0, 1.0, front);
+    let color = lighting(in.color, n, toon(dot(n, g.sun_dir.xyz)), 1.0, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(n));
 }
 
@@ -177,10 +201,7 @@ fn vs_grass(v: GrassIn) -> GrassOut {
     }
     // Travelling gust keyed on the base, tip only, in local space before the scale (as the web).
     let tip = local.y / BLADE_H;
-    let t = g.params.x;
-    var sway = sin(t * 1.6 - (v.pos.x + v.pos.z) * 0.45) * 0.5 + 0.5;
-    sway = sway * 0.12 + sin(t * 3.1 + v.pos.x * 2.0) * 0.02;
-    local += vec3f(0.7071, 0.0, -0.7071) * sway * tip;
+    local += gust(g.params.x, v.pos.xz) * tip;
     let world = v.pos + local * (0.7 + 0.6 * v.color_scale.a);
     var out: GrassOut;
     out.clip = g.view_proj * vec4f(world, 1.0);

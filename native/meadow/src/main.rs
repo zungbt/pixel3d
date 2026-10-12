@@ -71,9 +71,9 @@ impl App {
         }
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
-        let time = (self.time + dt) as f32;
-        let sky = self.sky.state(self.time + dt);
-        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, &sky)) {
+        let time = self.time + dt;
+        let sky = self.sky.state(time);
+        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, dt, &sky)) {
             Frame::Occluded => {
                 if self.retry_at.is_none() {
                     log::info!("occluded: pausing");
