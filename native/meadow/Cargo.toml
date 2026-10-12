@@ -13,6 +13,9 @@ env_logger = { version = "0.11", default-features = false, features = ["humantim
 glam = "0.34.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 meadow-core = { version = "0.1.0", path = "../meadow-core" }
+# The system time zone (Windows zone → IANA via CLDR) and local time, DST included. Default
+# features: on Windows that bundles the tzdb (~100–200 KB of exe).
+jiff = "0.2"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
