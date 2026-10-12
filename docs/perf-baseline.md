@@ -62,3 +62,25 @@ Measured on Windows (Intel UHD Graphics, driver 101.6127, 60 Hz screen), release
 | spike | blank window + egui label | Vulkan | none (vsync) / 30 / 15 | – | – | 14.1 / 7.5 / 4.1 % |
 
 CPU scales with frames drawn (~2.3 ms per frame), with or without the `WaitUntil` cap, so it's per-frame render/present cost, not the pacer. Fps cap holds within ±0.5 at 60/30/15.
+
+### Static scene (sub-project 1, T9)
+
+Release exe at `29a9cbc`, window 1280×720 at pixel size 2, noon scene. RAM after 60 s, CPU over the next 20 s (% of one core). "no layers" = `VK_LOADER_LAYERS_DISABLE=~implicit~`, which drops the OBS (`graphics-hook64.dll`) and RivaTuner (`RTSSVkLayer64.dll`) implicit layers this PC loads into every Vulkan app.
+
+| backend | fps cap | fps | working set (MB) | private (MB) | CPU | acquire / encode / submit / present (ms per frame) |
+|---|---|---|---|---|---|---|
+| Vulkan | 60 | 56–57 | 148 | 103 | 11.4 % | 0.07 / 0.62–0.88 / 0.36–0.62 / 0.20–0.33 |
+| Vulkan, no layers | 60 | 54–58 | 142 | 103 | 10.3 % | 0.07 / 0.56–0.86 / 0.40–0.45 / 0.37–0.56 |
+| DX12 | 60 | 59–60 | 185 | 167 | 14.8 % | 0.12–0.14 / 1.50–1.73 / 0.51–0.71 / 0.67–1.01 |
+| Vulkan | 15 | 15.0 | 142 | 103 | 3.2 % | 0.04–0.05 / 0.33–0.41 / 0.21–0.25 / 0.11–0.16 |
+| Vulkan, no layers | 15 | 14.7–15.0 | 140 | 101 | 3.5 % | 0.06 / 0.45–0.47 / 0.26–0.33 / 0.12–0.29 |
+
+Wallpaper mode (`--wallpaper`, 1920×1080, 15 fps, `a60f02e`: Vulkan-only instance + working-set trim on pause): ~147 MB working set / 97–101 MB private while drawing; 2–5 MB working set (same private) while the desktop is covered. Lively + WebView2 on the same PC: ~545 MB working set / ~437 MB private.
+
+Findings:
+- Within the SP1 target (≤ 200 MB working set, ≤ 130 MB private) on Vulkan; DX12 misses it (+63 MB private, +3.4 % CPU, encode twice as slow). Vulkan stays the default.
+- ~2 ms CPU per drawn frame overall (3.2 % at 15 fps), close to the blank spike's 2.3 ms; the timed phases are ~0.8–1.5 ms of it, the rest is the event loop and driver threads. Encode (one shadow, one scene, one post pass) is the biggest phase.
+- The OBS and RivaTuner layers cost ~3–6 MB working set and no CPU difference above noise: not worth disabling.
+- Validation is off in release (`InstanceFlags::from_build_config()` only sets `VALIDATION_INDIRECT_CALL`; we draw nothing indirect). Debug builds — `run.sh` without `--release` — run full validation, so never measure them.
+- At a 60 fps cap Vulkan delivers 54–58 fps while DX12 holds 59–60: the `WaitUntil` deadline sometimes lands just after a vsync under Fifo. Irrelevant for the wallpaper's 15 fps; worth a look only if a 60 fps mode matters.
+
