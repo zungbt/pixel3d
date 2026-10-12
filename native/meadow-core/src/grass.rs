@@ -5,12 +5,12 @@
 use libm::{ceil, floor, hypot, pow, sqrt};
 
 use crate::rng::Mulberry32;
-use crate::world::{GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
+use crate::world::{GROUND_CELL, GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
 
 pub const ATTEMPTS: u32 = 240_000; // the web's ~59 per square unit, over the whole ground
 const HALF: f64 = GROUND_SIZE / 2.0 - 0.1; // just inside the ground
 const SEED: u32 = 99;
-const NORMAL_E: f64 = 0.25; // as the ground mesh's vertex normals: half its 0.5 cell
+const NORMAL_E: f64 = GROUND_CELL / 2.0; // as the ground mesh's vertex normals
 
 // Canopy mask: 4 cells per unit over the placement area (no tree grows outside it).
 const MASK_RES: f64 = 4.0;
@@ -19,7 +19,7 @@ const MASK_N: usize = (SIZE * MASK_RES) as usize;
 #[derive(Debug, PartialEq)]
 pub struct Blade {
     pub x: f32,
-    pub y: f32, // height_at(x, z)
+    pub y: f32, // on the ground mesh
     pub z: f32,
     pub scale: f32,       // 0.7–1.3
     pub color: [f32; 3],  // linear rgb
@@ -80,6 +80,7 @@ pub fn place_grass(layout: &Layout) -> Vec<Blade> {
     let mut rng = Mulberry32::new(SEED);
     let mut rand = move || rng.next();
     let mask = CanopyMask::new(&layout.trees);
+    let ground = GroundGrid::new();
     let mut blades = Vec::new();
     for _ in 0..ATTEMPTS {
         let x = (rand() * 2.0 - 1.0) * HALF;
@@ -90,16 +91,52 @@ pub fn place_grass(layout: &Layout) -> Vec<Blade> {
         let scale = 0.7 + rand() * 0.6;
         let hue = 0.25 + rand() * 0.04;
         let lightness = 0.71 + rand() * 0.1;
-        blades.push(Blade {
-            x: x as f32,
-            y: height_at(x, z) as f32,
-            z: z as f32,
-            scale: scale as f32,
-            color: hsl_linear(hue, 0.5, lightness),
-            normal: ground_normal(x, z),
-        });
+        let (y, normal) = ground.at(x, z);
+        blades.push(Blade { x: x as f32, y, z: z as f32, scale: scale as f32, color: hsl_linear(hue, 0.5, lightness), normal });
     }
     blades
+}
+
+/// Heights and normals at the ground mesh's vertices. Each blade interpolates them over the triangle
+/// the GPU draws under it, so its root sits on the drawn ground, at a fifth of the `height_at` calls.
+struct GroundGrid {
+    n: usize, // cells per side
+    height: Vec<f64>,
+    normal: Vec<[f32; 3]>,
+}
+
+impl GroundGrid {
+    fn new() -> Self {
+        let n = (GROUND_SIZE / GROUND_CELL) as usize;
+        let at = |k: usize| -GROUND_SIZE / 2.0 + k as f64 * GROUND_CELL;
+        let (mut height, mut normal) = (Vec::with_capacity((n + 1) * (n + 1)), Vec::with_capacity((n + 1) * (n + 1)));
+        for j in 0..=n {
+            for i in 0..=n {
+                height.push(height_at(at(i), at(j)));
+                normal.push(ground_normal(at(i), at(j)));
+            }
+        }
+        Self { n, height, normal }
+    }
+
+    /// Height and normal at (x, z) inside the ground, as the mesh's triangles interpolate them: each
+    /// cell is split along its (i + 1, j)–(i, j + 1) diagonal.
+    fn at(&self, x: f64, z: f64) -> (f32, [f32; 3]) {
+        let (gx, gz) = ((x + GROUND_SIZE / 2.0) / GROUND_CELL, (z + GROUND_SIZE / 2.0) / GROUND_CELL);
+        let (i, j) = (floor(gx) as usize, floor(gz) as usize);
+        let (u, v) = (gx - i as f64, gz - j as f64);
+        let k = |di: usize, dj: usize| (j + dj) * (self.n + 1) + i + di;
+        let corners = if u + v <= 1.0 { [(k(0, 0), 1.0 - u - v), (k(1, 0), u), (k(0, 1), v)] } else { [(k(1, 1), u + v - 1.0), (k(0, 1), 1.0 - u), (k(1, 0), 1.0 - v)] };
+        let (mut y, mut n) = (0.0, [0.0; 3]);
+        for (c, w) in corners {
+            y += self.height[c] * w;
+            for (n, &m) in n.iter_mut().zip(&self.normal[c]) {
+                *n += m as f64 * w;
+            }
+        }
+        let len = sqrt(n.iter().map(|c| c * c).sum());
+        (y as f32, n.map(|c| (c / len) as f32))
+    }
 }
 
 /// The terrain normal as the ground mesh computes it (central differences of `height_at`), so the
@@ -178,14 +215,16 @@ mod tests {
     #[test]
     fn blades_sit_on_the_whole_ground() {
         let blades = &meadow().1;
+        let mut off = 0.0f64; // farthest root from the terrain: the mesh's flat triangles cut its curves
         for b in blades {
             let (x, z) = (b.x as f64, b.z as f64);
             assert!(x.abs() <= HALF && z.abs() <= HALF);
-            assert!((b.y as f64 - height_at(x, z)).abs() < 1e-4);
+            off = off.max((b.y as f64 - height_at(x, z)).abs());
             assert!((0.7..=1.3).contains(&b.scale));
             let [nx, ny, nz] = b.normal;
             assert!(((nx * nx + ny * ny + nz * nz).sqrt() - 1.0).abs() < 1e-5 && ny > 0.7, "{:?}", b.normal);
         }
+        assert!(off < 0.02, "{off}"); // ≈ curvature · cell² / 8, under half an art pixel
         // Out to the ground's edges, not just the 48 placement area.
         let far = |f: fn(&Blade) -> f32| blades.iter().map(|b| f(b).abs()).fold(0.0, f32::max);
         assert!(far(|b| b.x) > 31.0 && far(|b| b.z) > 31.0);

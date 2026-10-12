@@ -135,6 +135,26 @@ mod tests {
     }
 
     #[test]
+    fn blade_roots_sit_on_the_ground_mesh() {
+        // Height and normal at each root, interpolated over the mesh triangle the GPU draws there.
+        let ground = crate::mesh::ground();
+        let n = (ground.vertices.len() as f64).sqrt() as usize - 1; // cells per side
+        let cell = world::GROUND_SIZE / n as f64;
+        let blades = grass::place_grass(&world::place(42));
+        for b in blades.iter().step_by(53) {
+            let (gx, gz) = ((b.x as f64 + world::GROUND_SIZE / 2.0) / cell, (b.z as f64 + world::GROUND_SIZE / 2.0) / cell);
+            let (i, j) = (gx.floor() as usize, gz.floor() as usize);
+            let (u, v) = ((gx - i as f64) as f32, (gz - j as f64) as f32);
+            let at = |di: usize, dj: usize| &ground.vertices[(j + dj) * (n + 1) + i + di];
+            let tri = if u + v <= 1.0 { [(at(0, 0), 1.0 - u - v), (at(1, 0), u), (at(0, 1), v)] } else { [(at(1, 1), u + v - 1.0), (at(0, 1), 1.0 - u), (at(1, 0), 1.0 - v)] };
+            let y: f32 = tri.iter().map(|(p, w)| p.pos[1] * w).sum();
+            let normal = tri.iter().map(|(p, w)| Vec3::from(p.normal) * *w).sum::<Vec3>().normalize();
+            assert!((b.y - y).abs() < 1e-5, "root at {}, {}: {} vs mesh {y}", b.x, b.z, b.y);
+            assert!((Vec3::from(b.normal) - normal).abs().max_element() < 1e-5, "normal at {}, {}: {:?} vs mesh {normal}", b.x, b.z, b.normal);
+        }
+    }
+
+    #[test]
     fn blade_normals_match_the_ground_mesh() {
         // The outline pass compares a blade's normal with the ground behind it: they must agree.
         let ground = crate::mesh::ground();

@@ -9,6 +9,7 @@ use crate::rng::Mulberry32;
 
 pub const SIZE: f64 = 48.0; // placement area; the ground mesh is larger so no edge shows
 pub const GROUND_SIZE: f64 = 64.0; // the ground mesh: larger than the placement area, so no screen corner shows its edge
+pub const GROUND_CELL: f64 = 0.5; // the ground mesh's grid; grass roots interpolate over the same triangles
 
 // Pond: an irregular water polygon inside a wide sand beach, on terrain flattened around them.
 pub const POND_X: f64 = 6.2;
