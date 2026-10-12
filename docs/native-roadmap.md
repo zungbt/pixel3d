@@ -14,7 +14,7 @@ Decided with user:
 - Target `x86_64-pc-windows-gnu` (no MSVC SDK/licence). `native/.cargo/config.toml` sets only the linker `x86_64-w64-mingw32-gcc` — **no default `build.target`**, so `cargo test -p meadow-core` stays a Linux host build.
 - DX12 shaders compile with **FXC** (`d3dcompiler_47.dll`, ships with Windows); no `static-dxc` feature (it pulls MSVC-only bits). If FXC rejects our WGSL output, fall back to `WGPU_BACKEND=vulkan`.
 - `native/run.sh`: `taskkill.exe /IM meadow.exe /F` (ignore "not found" — a running exe is locked and the copy would fail) → `cargo build --target x86_64-pc-windows-gnu` → `mkdir -p /mnt/c/Users/d/pixel3d` + copy exe → launch via interop. Debug builds keep the console so `log` output is visible.
-- Spike: blank winit window + wgpu clear + egui-wgpu hello. Log adapter/backend; check the exe needs no mingw DLLs; measure RAM after 60 s on DX12 and Vulkan; measure frame-cap accuracy at 60/30/15 (Windows timer resolution); minimise/restore without panic. Pin the wgpu version that current egui-wgpu uses.
+- Spike (done 2026-10-12, commits on `feat/native-toolchain`): blank winit window + wgpu clear + egui-wgpu hello. Log adapter/backend; check the exe needs no mingw DLLs; measure RAM after 60 s on DX12 and Vulkan; measure frame-cap accuracy at 60/30/15 (Windows timer resolution); minimise/restore without panic. Pin the wgpu version that current egui-wgpu uses → wgpu 30 + winit 0.30 (egui 0.36). Passing env vars to the exe from WSL: `WSLENV=NAME` (not `NAME/u`).
 - **Exit:** exe runs on Windows; baseline RAM + cap accuracy recorded → sets the real RAM target.
 
 ## Architecture (workspace `native/`)
@@ -26,7 +26,7 @@ Decided with user:
 ## Frame loop (traced — differs from the web on purpose)
 - The web limiter (`src/frame-limiter.js`) *filters rAF ticks*. Natively there is no tick stream: skipping a frame under `Fifo` means no `get_current_texture` → no vsync block → the loop spins at 100 % CPU. So **don't port it 1:1**: `frame_pacer` returns the next deadline (`last + 1/fps`, same 1 ms early-tolerance and 250 ms stall reset, same "step along the schedule" rule) and the app sleeps with `ControlFlow::WaitUntil(deadline)` then `request_redraw`. Native (no cap) = `PresentMode::Fifo`, redraw every frame. `parseFps` ports 1:1; limiter tests are rewritten as deadline-sequence tests with the same expectations (≈ frame counts per second, stall reset).
 - `dt` from `Instant`, clamped to 0.1 s, 0 on the first frame (as `main.js`).
-- **Occluded/minimised** (`WindowEvent::Occluded(true)` or size 0): stop requesting redraws; resume on restore (dt clamp absorbs the gap). The browser did this for free; native must do it or it burns GPU in the background.
+- **Minimised** (size 0): stop requesting redraws; the restore `Resized` wakes the loop (dt clamp absorbs the gap). **Occluded**: winit never sends `WindowEvent::Occluded` on Windows, so rely on wgpu's `CurrentSurfaceTexture::Occluded` and retry every 250 ms (spike-verified). The browser did this for free; native must do it or it burns GPU in the background.
 - **Surface errors** (this is the native answer to the web's "context lost → reload", the suspected Lively crash path): `Outdated`/`Lost` → reconfigure surface and skip the frame; `Timeout` → skip; `OutOfMemory` → log and exit cleanly. Never reload/rebuild the scene.
 - **Resize**: ignore size 0 (configuring a 0×0 surface panics); art size = `max(1, floor(physical / pixelSize))` (winit physical size already includes DPR); rebuild art targets + grass view cull.
 
@@ -47,7 +47,7 @@ Decided with user:
 
 ## RAM target & measurement
 - Measure after 60 s at 12:00 and 18:30: `powershell.exe "Get-Process meadow | Select WorkingSet64,PrivateMemorySize64"` + Task Manager shared/dedicated GPU memory (iGPU allocs show as shared). One row per milestone in `docs/perf-baseline.md`.
-- Baseline to beat: 400+ MB. Target: final ≤ 120 MB working set incl. egui (stretch < 80 MB); finalised after the spike.
+- Baseline to beat: 400+ MB. Spike floor (blank window + egui, Vulkan): 145 MB working set / 80 MB private; DX12 is 142 / 120, so **Vulkan is the default backend**. Target: final ≤ 200 MB working set and ≤ 130 MB private (scene adds ~25–50 MB GPU data). See `docs/perf-baseline.md`.
 
 ## Risks → de-risk
 - Cross-compiled exe / FXC / backend issues, egui–wgpu version drift, driver RAM floor, frame-cap timer accuracy → all in the day-1 spike.
