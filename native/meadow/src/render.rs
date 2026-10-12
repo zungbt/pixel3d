@@ -465,6 +465,7 @@ impl Renderer {
 
     fn set_camera(&mut self, (w, h): (u32, u32)) {
         self.globals.view_proj = (camera::projection(w, h) * camera::view()).to_cols_array_2d();
+        self.grass.set_view((w, h));
     }
 
     /// New window size (never 0): rebuilds the art targets, the post bind group and the camera together.
@@ -474,7 +475,7 @@ impl Renderer {
         self.set_camera(art);
         let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32 };
         queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&params));
-        log::info!("art {}x{} at pixel size {}", art.0, art.1, self.pixel_size);
+        log::info!("art {}x{} at pixel size {}, {} grass blades drawn", art.0, art.1, self.pixel_size, self.grass.count);
     }
 
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f32) {
