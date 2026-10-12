@@ -77,6 +77,17 @@ Release exe at `29a9cbc`, window 1280×720 at pixel size 2, noon scene. RAM afte
 
 Wallpaper mode (`--wallpaper`, 1920×1080, 15 fps, `a60f02e`: Vulkan-only instance + working-set trim on pause): ~147 MB working set / 97–101 MB private while drawing; 2–5 MB working set (same private) while the desktop is covered. Lively + WebView2 on the same PC: ~545 MB working set / ~437 MB private.
 
+### Grass (sub-project 2, T4)
+
+One A/B round, `--wallpaper` at 1920×1080, pixel size 2, 15 fps, Vulkan. It came out invalid: maximised windows covered the desktop, so both exes were paused and trimmed (2 MB working set, 0 % GPU, 0.4–0.6 % CPU). Only the private bytes count, and they didn't move. The user chose not to rerun it.
+
+| exe | private (MB) | grass |
+|---|---|---|
+| main `557f191` | 101 | – |
+| feat/native-grass `84aece6` | 100 | 171,786 placed, 112,210 kept (2.2 MB buffer) |
+
+Drawn: 32,071 at 4:3, 40,155 at 16:10, 45,472 at 16:9, 61,849 at 21:9, the same at pixel sizes 2–4. Placement time on Windows (release): 856 ms with `height_at` per blade (`84aece6`); 204–241 ms (336 ms once, while Vite started alongside) once the roots interpolate the ground mesh's 129×129 vertex grid (`f332cc0`). That also runs again on each Explorer restart.
+
 Findings:
 - Within the SP1 target (≤ 200 MB working set, ≤ 130 MB private) on Vulkan; DX12 misses it (+63 MB private, +3.4 % CPU, encode twice as slow). Vulkan stays the default.
 - ~2 ms CPU per drawn frame overall (3.2 % at 15 fps), close to the blank spike's 2.3 ms; the timed phases are ~0.8–1.5 ms of it, the rest is the event loop and driver threads. Encode (one shadow, one scene, one post pass) is the biggest phase.
