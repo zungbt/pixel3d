@@ -47,8 +47,8 @@ pub fn rest_spots(layout: &Layout) -> [Rest; PIECES] {
     let away = (path_edge(clock::X, clock::Z + e) - path_edge(clock::X, clock::Z - e)).atan2(path_edge(clock::X + e, clock::Z) - path_edge(clock::X - e, clock::Z));
     for _ in 0..PIECES {
         let mut spot = (clock::X, clock::Z);
-        // Open grass, off the path and the water, clear of trunks, rocks and the other pieces
-        // (that last one dropped if there's no room).
+        // Open grass, off the path and the water, clear of trunks, rocks and the other pieces (that
+        // last one waived after 150 tries). No open spot in 200 leaves it at the post's foot.
         for attempt in 0..200 {
             let (a, d) = (away + (rand.next() - 0.5) * SPREAD, NEAR + rand.next() * (FAR - NEAR));
             let (x, z) = (clock::X + a.cos() * d, clock::Z + a.sin() * d);
@@ -121,6 +121,7 @@ fn catch_up_time(travel: f64) -> f64 {
 
 const HALF_DAY: f64 = 12.0 * HOUR;
 
+#[derive(Clone)]
 pub struct Wreck {
     progress: [f64; PIECES], // 0 standing, 1 lying in the grass
     broken: bool,
