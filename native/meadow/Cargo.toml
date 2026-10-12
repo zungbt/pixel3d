@@ -19,5 +19,5 @@ naga = { version = "30", features = ["wgsl-in"] }
 
 # Wallpaper mode (desktop attach, tray menu, autostart): Windows only, so `cargo test` stays a plain Linux build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Security", "Win32_System_LibraryLoader"] }
 tray-icon = { version = "0.26", default-features = false }

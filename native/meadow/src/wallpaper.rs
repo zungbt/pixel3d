@@ -10,7 +10,8 @@ use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, ScreenToClient};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::BOOL;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -176,6 +177,11 @@ unsafe extern "system" fn find_icons_holder(hwnd: HWND, out: LPARAM) -> BOOL {
         *(out as *mut HWND) = hwnd;
         0
     }
+}
+
+/// Hands the paused app's pages back to Windows (146 MB -> ~1 MB); they fault back in from standby on resume.
+pub fn trim_memory() {
+    unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
 }
 
 /// True when a maximised window, or a fullscreen foreground one, hides the desktop.

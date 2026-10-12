@@ -23,7 +23,9 @@ pub enum Frame {
 
 impl Gpu {
     pub fn new(window: Arc<Window>) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::VULKAN; // probing DX12 and GL as well loads their DLLs: +14 MB
+        let instance = wgpu::Instance::new(desc.with_env());
         let surface = instance.create_surface(window.clone()).expect("create surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),

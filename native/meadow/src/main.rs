@@ -1,7 +1,7 @@
 // The meadow at noon: ground, paths, pond, trees and rocks, toon-lit with pixel outlines.
 // Args: --fps N (60/30/20/15, default 15; 0 = no cap, vsync), --pixel-size 2|3|4 (default 2),
 // --wallpaper (Windows: behind the desktop icons, with a tray menu).
-// Backend override: WGPU_BACKEND=dx12|vulkan. Release builds have no console: they log to
+// Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod camera;
@@ -134,6 +134,9 @@ impl App {
             self.last_frame = None; // no catch-up jump
             self.frames = 0; // and the fps log doesn't average over the pause
             self.window_start = now;
+            if covered {
+                wallpaper::trim_memory();
+            }
         }
         Some(next)
     }
