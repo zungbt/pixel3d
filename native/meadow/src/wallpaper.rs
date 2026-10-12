@@ -73,6 +73,11 @@ impl Desktop {
         event.id == *exit.id()
     }
 
+    /// False once the desktop (and our window with it) is gone.
+    pub fn attached(&self) -> bool {
+        unsafe { IsWindow(self.host) != 0 }
+    }
+
     /// Our window was destroyed (Explorer restarted): look for the desktop afresh.
     pub fn lost(&mut self) {
         self.host = null_mut();
