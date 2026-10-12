@@ -1,0 +1,15 @@
+[package]
+name = "meadow"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Pinned to the versions egui-wgpu / egui-winit 0.36 build against.
+wgpu = "30"
+winit = "0.30"
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = { version = "0.36", default-features = false }
+pollster = "0.4"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
