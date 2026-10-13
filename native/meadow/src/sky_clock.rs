@@ -139,6 +139,15 @@ impl SkyClock {
         Self { mode, tz, place, cycle_start, fog }
     }
 
+    /// A city was chosen: the sun rises and sets there from now on.
+    #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
+    pub fn set_place(&mut self, place: (f64, f64)) {
+        self.place = place;
+        let now = now(&self.tz);
+        let today = sun::sun_times(now.date, now.offset_min, place);
+        log::info!("sky: place {:.2}, {:.2}, rise {}, set {}", place.0, place.1, hhmm(today.rise), hhmm(today.set));
+    }
+
     /// The local clock, or (false) the web's 300 s day carrying on from the time shown now.
     pub fn set_clock(&mut self, on: bool, anim_time: f64) {
         if on {

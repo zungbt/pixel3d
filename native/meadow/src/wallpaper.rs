@@ -1,6 +1,6 @@
 //! Wallpaper mode (Windows): the meadow lives behind the desktop icons, a window per monitor (or
 //! the primary's only), each pausing while a maximised or fullscreen window hides it, and a tray
-//! icon offers the settings, autostart and exit.
+//! icon offers the settings, the city search, autostart and exit.
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
@@ -49,11 +49,13 @@ pub fn already_running() -> bool {
 pub enum TrayAction {
     Exit,
     Set(Setting),
+    City, // open the city search
 }
 
 struct Tray {
     _icon: TrayIcon,
     choices: Vec<(CheckMenuItem, Setting)>, // one checked per kind of setting, like radio buttons
+    city: MenuItem,
     show_clock: CheckMenuItem,
     autostart: CheckMenuItem,
     exit: MenuItem,
@@ -114,7 +116,7 @@ impl Desktop {
     }
 
     /// Call once the event loop runs (the tray needs its message pump).
-    pub fn show_tray(&mut self, settings: &Settings) {
+    pub fn show_tray(&mut self, settings: &Settings, city: Option<&str>) {
         if self.tray.is_some() {
             return;
         }
@@ -142,12 +144,19 @@ impl Desktop {
             menu.append(&Submenu::with_items(title, true, &refs).expect("tray submenu")).expect("tray menu");
             choices.extend(items);
         }
+        let city = MenuItem::new(city_label(city), true, None);
         let show_clock = CheckMenuItem::new("Hiện đồng hồ", true, settings.show_clock, None);
         let autostart = CheckMenuItem::new("Chạy cùng Windows", true, autostart_enabled(), None);
         let exit = MenuItem::new("Thoát", true, None);
-        menu.append_items(&[&show_clock, &PredefinedMenuItem::separator(), &autostart, &exit]).expect("tray menu");
+        menu.append_items(&[&city, &show_clock, &PredefinedMenuItem::separator(), &autostart, &exit]).expect("tray menu");
         let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("pixel3d meadow").with_icon(icon()).build().expect("tray icon");
-        self.tray = Some(Tray { _icon: icon, choices, show_clock, autostart, exit });
+        self.tray = Some(Tray { _icon: icon, choices, city, show_clock, autostart, exit });
+    }
+
+    pub fn set_city(&self, name: &str) {
+        if let Some(tray) = &self.tray {
+            tray.city.set_text(city_label(Some(name)));
+        }
     }
 
     /// Handles a tray menu click.
@@ -159,6 +168,9 @@ impl Desktop {
         }
         if event.id == *tray.exit.id() {
             return Some(TrayAction::Exit);
+        }
+        if event.id == *tray.city.id() {
+            return Some(TrayAction::City);
         }
         if event.id == *tray.show_clock.id() {
             return Some(TrayAction::Set(Setting::ShowClock(tray.show_clock.is_checked())));
@@ -238,6 +250,10 @@ impl Desktop {
 }
 
 /// The rectangle around these monitors.
+fn city_label(name: Option<&str>) -> String {
+    name.map_or("Thành phố…".into(), |n| format!("Thành phố… ({n})"))
+}
+
 fn bounds(monitors: &[Monitor]) -> RECT {
     monitors.iter().fold(monitors[0].rect, |a, m| RECT {
         left: a.left.min(m.rect.left),

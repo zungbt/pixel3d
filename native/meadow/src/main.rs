@@ -2,7 +2,9 @@
 // PC's local time of day. Settings (pixel size, fps cap, clock or the web's 300 s day, fog, post
 // clock, all screens or the primary's) live in %APPDATA%\pixel3d\settings.txt, set from the tray
 // menu in wallpaper mode; there,
-// `place = lat, lon` overrides the place guessed from the time zone (sunrise and sunset).
+// `place = lat, lon` overrides the place guessed from the time zone (sunrise and sunset). A city
+// chosen from the tray sets `place` (and `city`, its name) and brings its real cloud cover and
+// wind, fetched from Open-Meteo every half hour.
 // Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
 // --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
 // local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
@@ -12,9 +14,13 @@
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod camera;
+#[cfg(windows)]
+mod city;
 mod gpu;
 mod grass;
 mod mesh;
+#[cfg(windows)]
+mod net;
 mod render;
 mod sky_clock;
 #[cfg(windows)]
@@ -41,7 +47,11 @@ const OCCLUDED_RETRY: Duration = Duration::from_millis(250);
 const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
 
 #[cfg(windows)]
-type UserEvent = tray_icon::menu::MenuEvent;
+pub enum UserEvent {
+    Menu(tray_icon::menu::MenuEvent),
+    City(meadow_core::weather::City),                                         // chosen in the search
+    Weather((f64, f64), Result<meadow_core::weather::Weather, String>), // a fetch for this place came back
+}
 #[cfg(not(windows))]
 type UserEvent = ();
 
@@ -63,6 +73,12 @@ struct App {
     window_start: Instant,
     #[cfg(windows)]
     desktop: Option<wallpaper::Desktop>, // Some in wallpaper mode
+    #[cfg(windows)]
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    #[cfg(windows)]
+    city: Option<String>, // the chosen city's name
+    #[cfg(windows)]
+    weather: net::LiveWeather,
 }
 
 // The open windows, one per screen (the first is the primary's), their surfaces on one device and
@@ -139,7 +155,11 @@ impl App {
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
-        scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock);
+        #[cfg(windows)]
+        let weather = self.weather.current();
+        #[cfg(not(windows))]
+        let weather = None;
+        scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock, weather.as_ref());
         for (i, frame) in frames {
             let view = frame.0.texture.create_view(&Default::default());
             scene.renderer.render(&scene.gpu.device, &scene.gpu.queue, i, &view);
@@ -296,13 +316,26 @@ impl App {
         }
         save_setting(setting);
     }
+
+    /// A city was chosen in the search: its sun and weather from now on, and remembered.
+    #[cfg(windows)]
+    fn choose_city(&mut self, city: meadow_core::weather::City) {
+        log::info!("city: {}, {} ({:.4}, {:.4})", city.name, city.detail, city.lat, city.lon);
+        self.sky.set_place((city.lat, city.lon));
+        self.weather.set_place((city.lat, city.lon));
+        if let Some(desktop) = self.desktop.as_ref() {
+            desktop.set_city(&city.name);
+        }
+        rewrite_settings("the city", |text| settings::save_city(text, &city));
+        self.city = Some(city.name);
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(windows)]
         if let Some(desktop) = self.desktop.as_mut() {
-            desktop.show_tray(&self.settings);
+            desktop.show_tray(&self.settings, self.city.as_deref());
         }
         if self.scene.is_none() {
             self.open(event_loop);
@@ -311,12 +344,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     #[cfg(windows)]
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let event = match event {
+            UserEvent::Menu(event) => event,
+            UserEvent::City(city) => return self.choose_city(city),
+            UserEvent::Weather(place, reply) => return self.weather.got(place, reply),
+        };
         match self.desktop.as_ref().and_then(|desktop| desktop.menu(&event)) {
             Some(wallpaper::TrayAction::Exit) => {
                 log::info!("tray: exit");
                 event_loop.exit();
             }
             Some(wallpaper::TrayAction::Set(setting)) => self.apply(setting),
+            Some(wallpaper::TrayAction::City) => city::open(self.proxy.clone(), self.city.clone()),
             None => {}
         }
     }
@@ -361,6 +400,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        self.weather.poll(&self.proxy);
         // Frames come far more often than checks, so waiting for the next frame never delays one.
         let check_at = self.check_desktop(event_loop);
         let idle = check_at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
@@ -449,12 +490,16 @@ fn settings_text() -> Option<String> {
 /// Rewrites the setting's line in settings.txt (creating the file and its folder). Failures are
 /// logged and otherwise ignored, as the web's; an unreadable file is left alone rather than lost.
 fn save_setting(setting: Setting) {
+    rewrite_settings(&format!("{setting:?}"), |text| settings::save(text, setting));
+}
+
+fn rewrite_settings(what: &str, edit: impl FnOnce(&str) -> String) {
     let Some(path) = settings_path() else { return };
     let text = match sky_clock::read_settings(&path) {
         Ok(text) => text.unwrap_or_default(),
-        Err(e) => return log::warn!("{e}; not saving {setting:?}"),
+        Err(e) => return log::warn!("{e}; not saving {what}"),
     };
-    let written = std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| std::fs::write(&path, settings::save(&text, setting)));
+    let written = std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| std::fs::write(&path, edit(&text)));
     if let Err(e) = written {
         log::warn!("saving {}: {e}", path.display());
     }
@@ -507,7 +552,7 @@ fn main() {
     {
         let proxy = event_loop.create_proxy();
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(event);
+            let _ = proxy.send_event(UserEvent::Menu(event));
         }));
     }
     let now = Instant::now();
@@ -530,6 +575,12 @@ fn main() {
         window_start: now,
         #[cfg(windows)]
         desktop: wallpaper.then(wallpaper::Desktop::new),
+        #[cfg(windows)]
+        proxy: event_loop.create_proxy(),
+        #[cfg(windows)]
+        city: text.as_deref().and_then(settings::city).map(str::to_string),
+        #[cfg(windows)]
+        weather: net::LiveWeather::new(text.as_deref().and_then(|t| meadow_core::sun::parse_place(t).ok().flatten())),
     };
     event_loop.run_app(&mut app).expect("event loop");
     log::info!("event loop ended");

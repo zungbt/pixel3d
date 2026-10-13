@@ -9,6 +9,7 @@ use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::clouds::{self, Clouds};
+use meadow_core::weather::Weather;
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
 use meadow_core::frog::{self, Frog};
@@ -932,14 +933,14 @@ impl Renderer {
     /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, at unix
     /// time `unix` (s, the weather's), with the post clock as `clock`. Once per frame, before
     /// rendering the views.
-    pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose) {
+    pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose, weather: Option<&Weather>) {
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
         self.globals.params[0] = time as f32;
         self.globals.params[1] = dial_glow(sky) * clock.glow as f32;
-        self.clouds.update(time, dt);
-        self.globals.params[2] = clouds::cover(unix, sky.elevation) as f32;
+        self.clouds.update(time, dt, weather);
+        self.globals.params[2] = clouds::cover(unix, sky.elevation, weather) as f32;
         let (big, wisps) = (self.clouds.big, self.clouds.wisps);
         self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
     }
