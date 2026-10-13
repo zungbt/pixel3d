@@ -32,11 +32,11 @@ impl Weather {
         self.wind_from.to_radians() + FRAC_PI_2
     }
 
-    /// The ground fog it makes, 0-1: thick under a kilometre's visibility, none past eight, and
-    /// a good deal whenever it's reported as fog.
+    /// The ground fog it makes, 0-1: thick under 200 m's visibility, none past 2 km (only real
+    /// fog, not haze), and some whenever it's reported as fog.
     pub fn fog(&self) -> f64 {
-        let thin = 1.0 - smoothstep(self.visibility_m, 1000.0, 8000.0);
-        if matches!(self.code, 45 | 48) { thin.max(0.8) } else { thin }
+        let thin = 1.0 - smoothstep(self.visibility_m, 200.0, 2000.0);
+        if matches!(self.code, 45 | 48) { thin.max(0.6) } else { thin }
     }
 }
 
@@ -288,10 +288,11 @@ pub(crate) mod tests {
     #[test]
     fn low_visibility_and_fog_reports_make_fog() {
         assert_eq!(CLEAR.fog(), 0.0);
-        assert_eq!(Weather { visibility_m: 500.0, ..CLEAR }.fog(), 1.0);
-        let haze = Weather { visibility_m: 4500.0, ..CLEAR }.fog();
-        assert!((0.3..0.7).contains(&haze), "{haze}");
-        assert_eq!(Weather { code: 45, ..CLEAR }.fog(), 0.8, "reported fog, though it's clear here");
+        assert_eq!(Weather { visibility_m: 150.0, ..CLEAR }.fog(), 1.0);
+        assert_eq!(Weather { visibility_m: 4500.0, ..CLEAR }.fog(), 0.0, "haze is no fog");
+        let mist = Weather { visibility_m: 1000.0, ..CLEAR }.fog();
+        assert!((0.3..0.7).contains(&mist), "{mist}");
+        assert_eq!(Weather { code: 45, ..CLEAR }.fog(), 0.6, "reported fog, though it's clear here");
         assert_eq!(Weather { code: 48, visibility_m: 200.0, ..CLEAR }.fog(), 1.0);
     }
 
