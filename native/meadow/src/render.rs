@@ -87,7 +87,7 @@ struct Globals {
     water_tint: [f32; 4],
     params: [f32; 4],
     fog: [f32; 4],    // rgb: ground fog colour, a: amount
-    clouds: [f32; 4], // xy: the big clouds' drift, zw: the wisps'
+    clouds: [f32; 4], // xy: the clouds' drift, zw: unused
     wind: [f32; 4],   // xy: where the grass leans, z: the gusts' phase (s), w: their strength
     rain: [f32; 4],   // x: how hard it's raining, y: how wet the meadow is
 }
@@ -967,8 +967,8 @@ impl Renderer {
         self.globals.params[3] = self.wind.flutter as f32;
         self.clouds.update(time, dt, weather, &self.wind);
         self.globals.params[2] = cover as f32;
-        let (big, wisps) = (self.clouds.big, self.clouds.wisps);
-        self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
+        let [x, z] = self.clouds.drift;
+        self.globals.clouds = [x as f32, z as f32, 0.0, 0.0];
     }
 
     /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),

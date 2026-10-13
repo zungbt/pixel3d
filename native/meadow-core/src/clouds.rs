@@ -1,5 +1,5 @@
-//! The cloud shadows' weather: how much of the sky is cloud, and where the two layers have drifted
-//! to. Their shapes are noise in the scene shader (common.wgsl's cloud_shade). With a city chosen,
+//! The cloud shadows' weather: how much of the sky is cloud, and where the clouds have drifted to.
+//! Their shapes are in the scene shader (common.wgsl's cloud_shade). With a city chosen,
 //! the real cover and wind (weather.rs) replace the made-up ones.
 use std::f64::consts::TAU;
 
@@ -10,9 +10,7 @@ use crate::weather::Weather;
 use crate::wind::Wind;
 use crate::world::{lerp, smoothstep};
 
-const BIG_SPEED: f64 = 0.33; // world units/s, as the web's drift
-const WISP_SPEED: f64 = 0.7; // the thin upper layer, faster
-const SHEAR: f64 = 0.45; // rad: the upper layer's wind turned from the lower's
+const SPEED: f64 = 0.15; // world units/s: half the web's, so they sail slowly over
 const HEADING: f64 = 0.38; // rad from +x: the web's drift direction
 const VEER: f64 = 0.5; // rad: the wind swings this far either way...
 const VEER_PERIOD: f64 = 1800.0; // ...over half an hour
@@ -24,12 +22,11 @@ const OVERCAST: (f64, f64) = (0.6, 1.0); // cover over which the sun goes behind
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clouds {
-    pub big: [f64; 2],   // the lower, big clouds' drift (world x, z)
-    pub wisps: [f64; 2], // the upper wisps'
+    pub drift: [f64; 2], // world x, z
 }
 
 impl Clouds {
-    /// Drifts both layers `dt` on at animation time `t` (s): the wind veers slowly, and the grass's
+    /// Drifts the clouds `dt` on at animation time `t` (s): the wind veers slowly, and the grass's
     /// gusts push the clouds along a little faster. Real `weather` sets the heading and speed.
     pub fn update(&mut self, t: f64, dt: f64, weather: Option<&Weather>, wind: &Wind) {
         let (base, veer, speed) = match weather {
@@ -38,10 +35,8 @@ impl Clouds {
         };
         let heading = base + veer * sin(t * TAU / VEER_PERIOD);
         let pull = speed * (1.0 + GUST_PULL * wind.gust());
-        for (layer, layer_speed, turn) in [(&mut self.big, BIG_SPEED, 0.0), (&mut self.wisps, WISP_SPEED, SHEAR)] {
-            layer[0] += cos(heading + turn) * layer_speed * pull * dt;
-            layer[1] += sin(heading + turn) * layer_speed * pull * dt;
-        }
+        self.drift[0] += cos(heading) * SPEED * pull * dt;
+        self.drift[1] += sin(heading) * SPEED * pull * dt;
     }
 }
 
@@ -120,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn the_layers_drift_steadily_with_a_little_gust() {
+    fn the_clouds_drift_steadily_with_a_little_gust() {
         let mut clouds = Clouds::default();
         let dt = 1.0 / 15.0;
         let mut t = 0.0;
@@ -129,15 +124,12 @@ mod tests {
             clouds.update(t, dt, None, &Wind::at(t));
             t += dt;
             let step = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) / dt;
-            let (big, wisps) = (step(clouds.big, before.big), step(clouds.wisps, before.wisps));
-            assert!((BIG_SPEED - 1e-9..=BIG_SPEED * (1.0 + GUST_PULL) + 1e-9).contains(&big), "{big}");
-            assert!((WISP_SPEED - 1e-9..=WISP_SPEED * (1.0 + GUST_PULL) + 1e-9).contains(&wisps), "{wisps}");
+            let speed = step(clouds.drift, before.drift);
+            assert!((SPEED - 1e-9..=SPEED * (1.0 + GUST_PULL) + 1e-9).contains(&speed), "{speed}");
         }
-        // After a minute, about a minute's drift, the upper layer further and turned.
-        let dist = clouds.big[0].hypot(clouds.big[1]);
-        assert!((BIG_SPEED * 60.0..BIG_SPEED * 60.0 * 1.15).contains(&dist), "{dist}");
-        let turn = clouds.wisps[1].atan2(clouds.wisps[0]) - clouds.big[1].atan2(clouds.big[0]);
-        assert!((turn - SHEAR).abs() < 1e-6);
+        // After a minute, about a minute's drift.
+        let dist = clouds.drift[0].hypot(clouds.drift[1]);
+        assert!((SPEED * 60.0..SPEED * 60.0 * 1.15).contains(&dist), "{dist}");
     }
 
     #[test]
@@ -160,7 +152,7 @@ mod tests {
             clouds.update(k as f64 / 15.0, 1.0 / 15.0, Some(&w), &Wind::at(k as f64 / 15.0));
         }
         // Eastward (+x), at twice the made-up speed and within the small swing.
-        let [x, z] = clouds.big;
-        assert!(x > BIG_SPEED * 2.0 * 60.0 * 0.95 && z.abs() < x * 0.16, "{x}, {z}");
+        let [x, z] = clouds.drift;
+        assert!(x > SPEED * 2.0 * 60.0 * 0.95 && z.abs() < x * 0.16, "{x}, {z}");
     }
 }
