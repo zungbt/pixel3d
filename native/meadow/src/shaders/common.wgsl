@@ -113,7 +113,7 @@ fn gradient_noise(p: vec3f) -> f32 {
 }
 
 // Cloud shadows: separate cumulus some 600 m up (a world unit is about 2.5 m) that drift with the
-// upper wind (the CPU's Clouds), each a few overlapping puffs (a lobed outline), 40-120 m across
+// upper wind (the CPU's Clouds), each a few overlapping puffs (a lobed outline), 25-80 m across
 // and many small, forming and melting away over 10-30 minutes; with more cover they swell and
 // merge. Their soft edges (the sun's disc from that high) in pixel-art steps over some 4 m. They
 // only dim direct light.
@@ -127,11 +127,11 @@ fn cloud_shade(world: vec3f) -> f32 {
     let reach = 240.0 * min(length(flat) / max(g.sun_dir.y, 0.05), 3.0); // world units
     let p = world.xz - g.clouds.xy + flat / max(length(flat), 1e-4) * reach;
     let m = t / 1200.0;
-    var s = max(cloud_cells(p, t, 42.0, 0.6, 1.0, 0), cloud_cells(p, t, 18.0, 0.35, 0.3, 1));
-    s += 3.6 * gradient_noise(vec3f(p * 0.1167, m)) + 1.5 * gradient_noise(vec3f(p.x * 0.3 + 3.0, p.y * 0.3, m));
+    var s = max(cloud_cells(p, t, 28.0, 0.6, 1.0, 0), cloud_cells(p, t, 12.0, 0.35, 0.3, 1));
+    s += 2.4 * gradient_noise(vec3f(p * 0.175, m)) + 1.0 * gradient_noise(vec3f(p.x * 0.45 + 3.0, p.y * 0.45, m));
     // Swollen with the cover so about that share of the ground is shaded (fitted to the field's spread).
     let c = max(cover, 0.01);
-    s += 3.0 * (1.252 + 1.588 * c + 1.269 * log(c) + 1.623 * c * c * c * c);
+    s += 2.0 * (1.252 + 1.588 * c + 1.269 * log(c) + 1.623 * c * c * c * c);
     let dim = mix(0.55, 0.35, cover);
     return 1.0 - (1.0 - dim) * (0.35 * step(0.0, s) + 0.35 * step(0.8, s) + 0.3 * step(1.6, s));
 }
