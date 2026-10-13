@@ -74,6 +74,7 @@ struct Scene {
     resized: Vec<Option<PhysicalSize<u32>>>, // applied once, just before the next frame
     minimised: Vec<bool>,
     covered: Vec<bool>, // wallpaper mode: a maximised or fullscreen window hides that screen
+    hidden_since: Vec<Option<Instant>>, // wallpaper mode: since when, before it counts as covered
 }
 
 impl Scene {
@@ -199,7 +200,7 @@ impl App {
             renderer.resize(&gpu.device, &gpu.queue, i, s.config.width, s.config.height);
         }
         let n = surfaces.len();
-        self.scene = Some(Scene { gpu, surfaces, renderer, resized: vec![None; n], minimised: vec![false; n], covered: vec![false; n] });
+        self.scene = Some(Scene { gpu, surfaces, renderer, resized: vec![None; n], minimised: vec![false; n], covered: vec![false; n], hidden_since: vec![None; n] });
     }
 
     /// Wallpaper mode, every CHECK_EVERY: (re)open the windows behind the icons if they're gone or
@@ -231,7 +232,14 @@ impl App {
             return Some(next);
         }
         let scene = self.scene.as_mut().unwrap();
-        let covered = if fallback { vec![false; scene.covered.len()] } else { self.desktop.as_ref().unwrap().covered() };
+        let hidden = if fallback { vec![false; scene.covered.len()] } else { self.desktop.as_ref().unwrap().covered() };
+        // A glance away (an alt-tab, a window maximised a moment) doesn't stop the meadow: a screen
+        // counts as covered only once hidden for PAUSE_AFTER.
+        let covered: Vec<bool> = hidden
+            .iter()
+            .zip(&mut scene.hidden_since)
+            .map(|(&h, since)| if h { now - *since.get_or_insert(now) >= wallpaper::PAUSE_AFTER } else { *since = None; false })
+            .collect();
         for (i, (&now_covered, was)) in covered.iter().zip(&mut scene.covered).enumerate() {
             if now_covered != *was {
                 log::info!("screen {i} {}", if now_covered { "covered" } else { "visible again" });
