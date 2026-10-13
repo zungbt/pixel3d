@@ -28,6 +28,7 @@ use winit::window::{Window, WindowAttributes};
 use crate::render::Screen;
 
 pub const CHECK_EVERY: Duration = Duration::from_secs(1);
+pub const PAUSE_AFTER: Duration = Duration::from_secs(15); // a screen hidden this long stops drawing
 // At login Explorer may not have built the desktop yet; after this long we give up and open a
 // normal window instead.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
