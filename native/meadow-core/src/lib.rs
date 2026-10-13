@@ -11,6 +11,7 @@ pub mod frog;
 pub mod gnats;
 pub mod grass;
 pub mod motion;
+pub mod rain;
 pub mod rng;
 pub mod settings;
 pub mod sky;

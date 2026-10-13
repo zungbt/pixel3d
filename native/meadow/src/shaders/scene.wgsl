@@ -159,9 +159,9 @@ fn on_path(x: f32, z: f32) -> bool {
 @fragment
 fn fs_ground(in: VertexOut) -> SceneOut {
     let n = normalize(in.normal);
-    var base = in.color;
+    var base = in.color * (1.0 - 0.25 * g.rain.y); // darker wet
     if on_path(in.world.x, in.world.z) {
-        base = PATH_COLOR;
+        base = PATH_COLOR * (1.0 - 0.4 * g.rain.y);
     }
     let lit = shadow(in.world, n);
     let color = lighting(base * in.extra, n, toon_soft(dot(n, g.sun_dir.xyz)), lit, in.world);
@@ -187,10 +187,18 @@ fn fs_water(in: VertexOut) -> SceneOut {
     let sp = vec2f((p.x - p.y) * 0.7071 + t * 0.08, (p.x + p.y) * 0.7071);
     let h = noise_hash(floor(sp * vec2f(4.0, 12.0)));
     let is_glint = edge < 0.85 && h > 0.97 && sin(t * 2.0 + h * 60.0) > 0.5;
+    // Rain: rings spreading from where the drops land, in as many cells as it's raining hard.
+    let cell = floor(p * 2.5);
+    let cycle = t * 0.9 + noise_hash(cell) * 8.0;
+    let k = floor(cycle) % 37.0; // a new spot each drop
+    let drop = (cell + 0.25 + 0.5 * vec2f(noise_hash(cell + vec2f(k, 1.0)), noise_hash(cell + vec2f(2.0, k)))) / 2.5;
+    let age = fract(cycle);
+    let ring = abs(length(p - drop) - age * 0.18) < 0.025 && age < 0.8;
+    let is_ripple = edge < 0.9 && ring && noise_hash(cell + vec2f(k, 5.0)) < g.rain.x;
     if is_bank {
         water = WATER_BANK;
     }
-    if is_foam || is_glint {
+    if is_foam || is_glint || is_ripple {
         water = WATER_FOAM;
     }
     let n = vec3f(0.0, 1.0, 0.0);
@@ -241,6 +249,6 @@ fn vs_grass(v: GrassIn) -> GrassOut {
 fn fs_grass(in: GrassOut) -> SceneOut {
     let up = vec3f(0.0, 1.0, 0.0);
     let lit = shadow(in.world, up);
-    let color = lighting(in.color, up, toon(dot(up, g.sun_dir.xyz)), lit, in.world);
+    let color = lighting(in.color * (1.0 - 0.25 * g.rain.y), up, toon(dot(up, g.sun_dir.xyz)), lit, in.world);
     return SceneOut(vec4f(color, 1.0), view_normal(in.ground_normal));
 }

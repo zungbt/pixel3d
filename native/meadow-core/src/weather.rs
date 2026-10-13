@@ -1,5 +1,5 @@
 //! Real weather from Open-Meteo (free, no key): the city search's places and a place's current
-//! cloud cover, wind and visibility. Only the URLs and the parsing live here; the HTTP is the exe's.
+//! cloud cover, wind, visibility and rain. Only the URLs and the parsing live here; the HTTP is the exe's.
 use std::f64::consts::FRAC_PI_2;
 
 use crate::world::smoothstep;
@@ -37,6 +37,31 @@ impl Weather {
     pub fn fog(&self) -> f64 {
         let thin = 1.0 - smoothstep(self.visibility_m, 200.0, 2000.0);
         if matches!(self.code, 45 | 48) { thin.max(0.6) } else { thin }
+    }
+
+    /// How hard it's raining, 0-1, by the weather code (snow counts as none).
+    pub fn rain(&self) -> f64 {
+        match self.code {
+            51 => 0.15, // drizzle: light, moderate, dense; freezing
+            53 | 56 => 0.25,
+            55 | 57 => 0.35,
+            61 => 0.4, // rain: slight, moderate, heavy; freezing
+            66 => 0.45,
+            63 => 0.65,
+            65 | 67 => 1.0,
+            80 => 0.45, // showers: slight, moderate, violent
+            81 => 0.7,
+            82 => 1.0,
+            95 => 0.8, // thunderstorm, with hail
+            96 => 0.9,
+            99 => 1.0,
+            _ => 0.0,
+        }
+    }
+
+    /// A thunderstorm: lightning.
+    pub fn storm(&self) -> bool {
+        matches!(self.code, 95 | 96 | 99)
     }
 }
 
@@ -294,6 +319,14 @@ pub(crate) mod tests {
         assert!((0.3..0.7).contains(&mist), "{mist}");
         assert_eq!(Weather { code: 45, ..CLEAR }.fog(), 0.6, "reported fog, though it's clear here");
         assert_eq!(Weather { code: 48, visibility_m: 200.0, ..CLEAR }.fog(), 1.0);
+    }
+
+    #[test]
+    fn rain_and_thunder_by_the_code() {
+        let rain = |code| Weather { code, ..CLEAR }.rain();
+        assert_eq!([0, 3, 45, 73].map(rain), [0.0; 4], "clear, cloudy, fog, snow");
+        assert!(rain(51) < rain(61) && rain(61) < rain(63) && rain(63) < rain(65));
+        assert!(Weather { code: 95, ..CLEAR }.storm() && !Weather { code: 65, ..CLEAR }.storm());
     }
 
     #[test]

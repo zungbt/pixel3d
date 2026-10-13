@@ -13,6 +13,7 @@ struct Globals {
     fog: vec4f,         // rgb: ground fog colour, a: amount (0: none)
     clouds: vec4f,      // xy: the big clouds' drift, zw: the wisps' (world units)
     wind: vec4f,        // xy: where the grass leans, z: the gusts' phase (s), w: their strength
+    rain: vec4f,        // x: how hard it's raining, y: how wet the meadow is (0-1)
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;

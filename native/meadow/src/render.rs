@@ -9,6 +9,7 @@ use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::clouds::{self, Clouds};
+use meadow_core::rain::Rain;
 use meadow_core::wind::Wind;
 use meadow_core::weather::Weather;
 use meadow_core::dragonflies::{self, Dragonflies};
@@ -87,6 +88,7 @@ struct Globals {
     fog: [f32; 4],    // rgb: ground fog colour, a: amount
     clouds: [f32; 4], // xy: the big clouds' drift, zw: the wisps'
     wind: [f32; 4],   // xy: where the grass leans, z: the gusts' phase (s), w: their strength
+    rain: [f32; 4],   // x: how hard it's raining, y: how wet the meadow is
 }
 
 #[repr(C)]
@@ -118,6 +120,7 @@ struct PostParams {
     art: [u32; 2],
     pixel_size: u32,
     manual_srgb: u32,
+    rain: [f32; 4], // how hard, its clock, the slant, the brightness: written each frame
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +371,8 @@ pub struct Renderer {
     frog: Frog,
     clouds: Clouds,
     wind: Wind,
+    rain: Rain,
+    post_rain: [f32; 4],
     frog_draw: Draw,
     pixel_size: u32,
 }
@@ -820,6 +825,8 @@ impl Renderer {
             frog: Frog::new(),
             clouds: Clouds::default(),
             wind: Wind::default(),
+            rain: Rain::default(),
+            post_rain: [0.0; 4],
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
         }
@@ -872,7 +879,7 @@ impl Renderer {
         view.pane = Pane::new(view.art, view.offset, primary_art, self.pixel_size);
         view.targets = Self::targets(device, &self.post_layout, &view.post_buf, view.art);
         view.grass.set_view(view.pane, view.art);
-        let params = PostParams { art: [view.art.0, view.art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32 };
+        let params = PostParams { art: [view.art.0, view.art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain };
         queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
         log::info!("view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn", view.art.0, view.art.1, self.pixel_size, view.pane.centre, view.grass.count);
     }
@@ -938,10 +945,19 @@ impl Renderer {
     /// time `unix` (s, the weather's), with the post clock as `clock`. Once per frame, before
     /// rendering the views.
     pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose, weather: Option<&Weather>) {
-        self.set_sky(sky);
         self.wind.update(dt, weather);
+        self.rain.update(dt, weather);
+        let lit = sky.daylight;
+        let sky = &self.rain.sky(sky);
+        self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
+        self.globals.rain = [self.rain.falling as f32, self.rain.wet as f32, 0.0, 0.0];
+        // The streaks blow across the screen with the wind (the screen's right is world x - z).
+        let [lx, lz] = self.wind.lean();
+        let slant = ((lx - lz) * std::f64::consts::FRAC_1_SQRT_2 * 0.35 * self.wind.strength).clamp(-0.6, 0.6);
+        let bright = world::lerp(0.12, 0.55, lit) + 0.5 * self.rain.flash();
+        self.post_rain = [self.rain.falling, time % 600.0, slant, bright].map(|v| v as f32);
         self.globals.params[0] = time as f32;
         self.globals.params[1] = dial_glow(sky) * clock.glow as f32;
         let [lx, lz] = self.wind.lean();
@@ -963,6 +979,7 @@ impl Renderer {
             ..self.globals
         };
         queue.write_buffer(&view.globals_buf, 0, bytemuck::bytes_of(&globals));
+        queue.write_buffer(&view.post_buf, std::mem::offset_of!(PostParams, rain) as u64, bytemuck::bytes_of(&self.post_rain));
         let mut encoder = device.create_command_encoder(&Default::default());
         let depth_attachment = |view| {
             Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1100,6 +1117,6 @@ mod tests {
             })
             .expect("Globals in common.wgsl");
         assert_eq!(span as usize, size_of::<Globals>());
-        assert_eq!(size_of::<Globals>(), 336, "three mat4 and nine vec4");
+        assert_eq!(size_of::<Globals>(), 352, "three mat4 and ten vec4");
     }
 }
