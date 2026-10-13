@@ -10,6 +10,7 @@ use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
+use meadow_core::frog::{self, Frog};
 use meadow_core::gnats::{self, Gnats};
 use meadow_core::flowers::{self, HEAD_R, HEAD_Y};
 use meadow_core::flight::V3;
@@ -41,6 +42,15 @@ const IRON: u32 = 0x3a4044; // the post clock's post and rim
 const INK: u32 = 0x23262b; // its ticks and hands
 const CREAM: u32 = 0xf3ead2; // its face
 const MOSS: u32 = 0x55663a; // its pieces, long fallen
+const MOSSY_ROCK: u32 = 0x8c9a80; // the frog's stone
+const LILY_PAD: u32 = 0x4f8a3a;
+const FROG: u32 = 0x5a9a3c;
+const FROG_LEGS: u32 = 0x3d6e2a;
+const FROG_EYES: u32 = 0x8cc060;
+const PUPIL: u32 = 0x1c1c1c;
+const THROAT: u32 = 0xe6dca0;
+const TONGUE: u32 = 0xd8667a;
+const FROG_PARTS: usize = 12;
 const SHADER_COLORS: [(&str, u32); 7] = [
     ("PATH_COLOR", 0xc3a284),
     ("WATER_DEEP", 0x3a8fc9),
@@ -350,6 +360,8 @@ pub struct Renderer {
     unlit_pipeline: wgpu::RenderPipeline,
     dial_pipeline: wgpu::RenderPipeline,
     post_clock: PostClock,
+    frog: Frog,
+    frog_draw: Draw,
     pixel_size: u32,
 }
 
@@ -532,6 +544,16 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
             let m = at(r.x, r.y, r.z) * Mat4::from_rotation_y(r.rot_y as f32) * Mat4::from_scale(Vec3::new(r.r as f32, r.sy as f32, r.r as f32));
             Instance::new(m, ROCK)
         })
+        .chain([{
+            let s = frog::stone();
+            Instance::new(at(s.x, s.y, s.z) * Mat4::from_scale(Vec3::new(frog::STONE_R as f32, frog::STONE_H as f32, frog::STONE_R as f32)), MOSSY_ROCK)
+        }])
+        .collect();
+    // Each pad's notch turned a different way.
+    let pads: Vec<_> = frog::pads()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| Instance::new(at(p.x, p.y, p.z) * Mat4::from_rotation_y(i as f32 * 2.1), LILY_PAD))
         .collect();
     // Heads in the wind, so the mesh sits HEAD_Y up in its own space (the sway grows with local y).
     let mut head = mesh::octahedron();
@@ -546,6 +568,7 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
         upload(device, mesh::trunk(), &trunks, Shade::Toon, true),
         upload(device, mesh::icosahedron(), &crowns, Shade::Toon, true),
         upload(device, mesh::dodecahedron(), &rocks, Shade::Toon, true),
+        upload(device, mesh::sector(0.0, frog::PAD_R as f32, std::f32::consts::TAU - 0.5, 12), &pads, Shade::Toon, false),
         upload(device, head, &heads, Shade::Toon, false),
     ]
 }
@@ -557,6 +580,42 @@ fn footprint(pane: Pane, art: (u32, u32)) -> [[f64; 2]; 4] {
         let p = camera::ground_at(pane.centre + half * Vec2::new(sx, sy));
         [p.x as f64, p.z as f64]
     })
+}
+
+/// The frog in cubes (FROG_PARTS of them), facing +z from between its feet; hidden parts get a
+/// zero matrix.
+fn frog_parts(f: &frog::Pose) -> Vec<Instance> {
+    let frame = Mat4::from_translation(Vec3::new(f.pos.x as f32, f.pos.y as f32, f.pos.z as f32)) * Mat4::from_rotation_y(f.yaw as f32);
+    let (stretch, puff) = (f.stretch as f32, f.puff as f32);
+    let cube = |centre: Vec3, size: Vec3, color: u32| Instance::new(frame * Mat4::from_translation(centre) * Mat4::from_scale(size), color);
+    let eye_h = if f.blink { 0.01 } else { 0.06 };
+    let mut parts = vec![
+        // Nose up a little; the back legs kick out mid hop.
+        Instance::new(frame * Mat4::from_translation(Vec3::new(0.0, 0.09, -0.02)) * Mat4::from_rotation_x(-0.25) * Mat4::from_scale(Vec3::new(0.22, 0.13, 0.26)), FROG),
+        cube(Vec3::new(0.0, 0.15, 0.12), Vec3::new(0.2, 0.1, 0.13), FROG),
+        cube(Vec3::new(0.0, 0.09, 0.15 + 0.03 * puff), Vec3::new(0.12, 0.05, 0.08) + Vec3::splat(0.11 * puff), THROAT),
+    ];
+    for side in [-1.0_f32, 1.0] {
+        parts.push(cube(Vec3::new(0.07 * side, 0.21, 0.12), Vec3::new(0.06, eye_h, 0.06), FROG_EYES));
+        let pupil = Vec3::new(0.07 * side, 0.215, 0.152);
+        parts.push(if f.blink { Instance::new(Mat4::ZERO, PUPIL) } else { cube(pupil, Vec3::new(0.03, 0.035, 0.01), PUPIL) });
+        let back = 0.16 + 0.14 * stretch;
+        parts.push(cube(Vec3::new(0.11 * side, 0.035 + 0.03 * stretch, -0.06 - back / 2.0 + 0.08), Vec3::new(0.07, 0.06, back), FROG_LEGS));
+        parts.push(cube(Vec3::new(0.08 * side, 0.04, 0.11 + 0.05 * stretch), Vec3::new(0.04, 0.08, 0.04), FROG_LEGS));
+    }
+    // The tongue: from the mouth out toward what it snaps at.
+    parts.push(match f.tongue {
+        Some((at, out)) if out > 0.0 => {
+            let mouth = frame.transform_point3(Vec3::new(0.0, 0.13, 0.19));
+            let to = Vec3::new(at.x as f32, at.y as f32, at.z as f32) - mouth;
+            let reach = to.length() * out as f32;
+            let m = Mat4::from_translation(mouth + to.normalize() * reach / 2.0) * Mat4::from_quat(Quat::from_rotation_arc(Vec3::Z, to.normalize())) * Mat4::from_scale(Vec3::new(0.025, 0.02, reach));
+            Instance::new(m, TONGUE)
+        }
+        _ => Instance::new(Mat4::ZERO, TONGUE),
+    });
+    debug_assert_eq!(parts.len(), FROG_PARTS);
+    parts
 }
 
 /// Art pixels covering the window; the last row/column may be cut off by the window edge.
@@ -751,6 +810,8 @@ impl Renderer {
             unlit_pipeline,
             dial_pipeline,
             post_clock: PostClock::new(device, &world_layout),
+            frog: Frog::new(),
+            frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
         }
     }
@@ -857,6 +918,11 @@ impl Renderer {
         let specks: Vec<_> =
             self.fireflies.poses().iter().map(|p| speck((p.glow > 0.1).then_some(p.pos), fireflies::SIZE, glow * p.glow as f32)).collect();
         queue.write_buffer(&self.firefly_draw.instances, 0, bytemuck::cast_slice(&specks));
+
+        let insects = self.gnats.poses().iter().flatten().copied().chain(self.dragonflies.poses().iter().map(|p| p.pos));
+        self.frog.update(dt, sky.daylight, sky.phase, insects);
+        let parts = frog_parts(&self.frog.pose(sky.daylight, sky.phase));
+        queue.write_buffer(&self.frog_draw.instances, 0, bytemuck::cast_slice(&parts));
     }
 
     /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, with the
@@ -916,7 +982,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &view.globals_group, &[]);
-            for d in self.draws.iter().chain(&self.post_clock.draws).filter(|d| d.casts_shadow) {
+            for d in self.draws.iter().chain(&self.post_clock.draws).chain([&self.frog_draw]).filter(|d| d.casts_shadow) {
                 draw(&mut pass, d);
             }
         }
@@ -936,7 +1002,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &view.globals_group, &[]);
             pass.set_bind_group(1, &self.shadow_group, &[]);
-            let insects = [&self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
+            let insects = [&self.frog_draw, &self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
             for d in self.draws.iter().chain(&self.post_clock.draws).chain(insects) {
                 pass.set_pipeline(match d.shade {
                     Shade::Toon => &self.toon_pipeline,

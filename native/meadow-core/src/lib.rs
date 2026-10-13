@@ -6,6 +6,7 @@ pub mod fireflies;
 pub mod flight;
 pub mod flowers;
 pub mod frame_pacer;
+pub mod frog;
 pub mod gnats;
 pub mod grass;
 pub mod motion;
