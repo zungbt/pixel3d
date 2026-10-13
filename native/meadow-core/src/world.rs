@@ -142,8 +142,13 @@ fn branch_edge(x: f64, z: f64) -> f64 {
     }
     let k = exp(-(x - x0) / BRANCH_A); // also the curve's slope
     let dist = (z - (BRANCH_Z0 + BRANCH_A * (1.0 - k))).abs() / sqrt(1.0 + k * k);
-    let half_w = path_half_w(z, x) * BRANCH_WIDTH * (1.0 - smoothstep(x, BRANCH_X1 - BRANCH_TAPER, BRANCH_X1));
-    dist - half_w
+    let open = 1.0 - smoothstep(x, BRANCH_X1 - BRANCH_TAPER, BRANCH_X1);
+    if open <= 0.0 {
+        return f64::INFINITY; // past its tip: no path, so no thinned grass along where it would run
+    }
+    let edge = dist - path_half_w(z, x) * BRANCH_WIDTH * open;
+    // Beside the path, distances stretch as it narrows, so the thinned grass narrows and ends with it.
+    if edge > 0.0 { edge / open } else { edge }
 }
 
 /// Distance from the edge of either path: < 0 is on a path.
@@ -300,6 +305,25 @@ pub fn place_in(rng: &mut Mulberry32, height: &dyn Fn(f64, f64) -> f64, area: Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_branch_ends_with_its_taper() {
+        use path::*;
+        let centre = |x: f64| BRANCH_Z0 + BRANCH_A * (1.0 - exp(-(x - branch_x0()) / BRANCH_A));
+        // On the path before the taper; past the tip, grass grows at full density (path_edge ≥ 0.8)
+        // all the way to the world's edge and beyond.
+        for x in [2.0, 8.0, BRANCH_X1 - BRANCH_TAPER] {
+            assert!(path_edge(x, centre(x)) < 0.0, "x {x}");
+        }
+        for x in [BRANCH_X1, 20.0, 31.9, 60.0] {
+            assert!(path_edge(x, centre(x)) >= 0.8, "x {x}: {}", path_edge(x, centre(x)));
+        }
+        // Unchanged where it's full width; in the taper the thinned band shrinks with it.
+        let x = BRANCH_X1 - BRANCH_TAPER - 1.0;
+        assert_eq!(branch_edge(x, centre(x) + 1.0), (1.0 / sqrt(1.0 + exp(-2.0 * (x - branch_x0()) / BRANCH_A))) - path_half_w(centre(x) + 1.0, x) * BRANCH_WIDTH);
+        let band = |x: f64| (0..200).map(|k| k as f64 * 0.01).find(|&d| branch_edge(x, centre(x) + d) >= 0.8).unwrap_or(2.0);
+        assert!(band(12.5) > band(13.5) && band(13.5) > band(14.5), "{} {} {}", band(12.5), band(13.5), band(14.5));
+    }
 
     // The web's terrain (two sines), only to check the placement port against its dump.
     fn web_base(x: f64, z: f64) -> f64 {
