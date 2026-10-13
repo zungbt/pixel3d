@@ -1,28 +1,34 @@
-//! Device, queue and the window's surface. The Instance is kept so a lost surface can be recreated.
+//! Device and queue, shared by every window, and each window's surface. The Instance is kept so a
+//! lost surface can be recreated.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use winit::window::Window;
 
 pub struct Gpu {
-    pub window: Arc<Window>,
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
-    pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub config: wgpu::SurfaceConfiguration,
     failed: Arc<AtomicBool>, // set by the device-lost / uncaptured-error callbacks
 }
 
-pub enum Frame {
-    Drawn,
+/// A window and its swapchain.
+pub struct Surface {
+    pub window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    pub config: wgpu::SurfaceConfiguration,
+}
+
+/// Why a surface gave no texture this frame.
+pub enum Missed {
     Occluded,
     Skipped,
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>) -> Self {
+    /// The device is picked to present to the first window's surface.
+    pub fn new(window: Arc<Window>) -> (Self, Surface) {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::VULKAN; // probing DX12 and GL as well loads their DLLs: +14 MB
         let instance = wgpu::Instance::new(desc.with_env());
@@ -52,17 +58,31 @@ impl Gpu {
             log::error!("gpu error: {e}");
             flag.store(true, Ordering::Relaxed);
         }));
+        let gpu = Self { instance, adapter, device, queue, failed };
+        let surface = gpu.configure_new(window, surface, None);
+        (gpu, surface)
+    }
 
+    /// A surface for another window on the same device, in the first's format (the pipelines'),
+    /// so all monitors on one GPU share it.
+    pub fn surface(&self, window: Arc<Window>, format: wgpu::TextureFormat) -> Surface {
+        let surface = self.instance.create_surface(window.clone()).expect("create surface");
+        assert!(self.adapter.is_surface_supported(&surface), "adapter can't present to this window");
+        self.configure_new(window, surface, Some(format))
+    }
+
+    fn configure_new(&self, window: Arc<Window>, surface: wgpu::Surface<'static>, format: Option<wgpu::TextureFormat>) -> Surface {
         let size = window.inner_size();
         let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .get_default_config(&self.adapter, size.width.max(1), size.height.max(1))
             .expect("surface unsupported by adapter");
-        let caps = surface.get_capabilities(&adapter);
-        config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let caps = surface.get_capabilities(&self.adapter);
+        config.format = format.unwrap_or_else(|| caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]));
+        assert!(caps.formats.contains(&config.format), "surface can't take {:?}", config.format);
         config.present_mode = wgpu::PresentMode::Fifo;
-        surface.configure(&device, &config);
+        surface.configure(&self.device, &config);
         log::info!("surface: {:?} {}x{}", config.format, config.width, config.height);
-        Self { window, instance, adapter, surface, device, queue, config, failed }
+        Surface { window, surface, config }
     }
 
     pub fn failed(&self) -> bool {
@@ -70,40 +90,40 @@ impl Gpu {
     }
 
     /// Never called with a 0 size: configuring a 0x0 surface panics.
-    pub fn configure(&mut self, width: u32, height: u32) {
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+    pub fn configure(&self, s: &mut Surface, width: u32, height: u32) {
+        s.config.width = width;
+        s.config.height = height;
+        s.surface.configure(&self.device, &s.config);
     }
 
-    /// Acquires the next swapchain texture, hands it to `draw`, presents it, and recovers the
-    /// surface when it is outdated, suboptimal or lost.
-    pub fn frame(&mut self, draw: impl FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView)) -> Frame {
-        let (frame, suboptimal) = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) => (f, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(f) => (f, true),
-            wgpu::CurrentSurfaceTexture::Occluded => return Frame::Occluded,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Validation => return Frame::Skipped,
+    /// The next swapchain texture, recovering the surface when it is outdated or lost.
+    pub fn acquire(&self, s: &mut Surface) -> Result<(wgpu::SurfaceTexture, bool), Missed> {
+        match s.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) => Ok((f, false)),
+            wgpu::CurrentSurfaceTexture::Suboptimal(f) => Ok((f, true)),
+            wgpu::CurrentSurfaceTexture::Occluded => Err(Missed::Occluded),
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Validation => Err(Missed::Skipped),
             wgpu::CurrentSurfaceTexture::Outdated => {
                 log::warn!("surface outdated: reconfiguring");
-                self.surface.configure(&self.device, &self.config);
-                return Frame::Skipped;
+                s.surface.configure(&self.device, &s.config);
+                Err(Missed::Skipped)
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 log::warn!("surface lost: recreating");
-                self.surface = self.instance.create_surface(self.window.clone()).expect("recreate surface");
-                assert!(self.adapter.is_surface_supported(&self.surface), "adapter can't present to the new surface");
-                self.surface.configure(&self.device, &self.config);
-                return Frame::Skipped;
+                s.surface = self.instance.create_surface(s.window.clone()).expect("recreate surface");
+                assert!(self.adapter.is_surface_supported(&s.surface), "adapter can't present to the new surface");
+                s.surface.configure(&self.device, &s.config);
+                Err(Missed::Skipped)
             }
-        };
-        let view = frame.texture.create_view(&Default::default());
-        draw(&self.device, &self.queue, &view);
-        self.window.pre_present_notify();
+        }
+    }
+
+    /// Presents a texture from `acquire`, reconfiguring after if it was suboptimal.
+    pub fn present(&self, s: &Surface, (frame, suboptimal): (wgpu::SurfaceTexture, bool)) {
+        s.window.pre_present_notify();
         self.queue.present(frame);
         if suboptimal {
-            self.surface.configure(&self.device, &self.config);
+            s.surface.configure(&self.device, &s.config);
         }
-        Frame::Drawn
     }
 }

@@ -5,10 +5,9 @@ use libm::floor;
 
 use crate::grass::{CanopyMask, grass_density};
 use crate::rng::Mulberry32;
-use crate::world::{Layout, SIZE, fbm, height_at, smoothstep};
+use crate::world::{Area, Layout, Rock, SIZE, fbm, height_at, smoothstep};
 
-const ATTEMPTS: u32 = 24_000; // ~1800 flowers, ~9 patches in view
-const HALF: f64 = SIZE / 2.0 - 0.1;
+pub const ATTEMPTS: u32 = 24_000; // ~1800 flowers, ~9 patches in view
 const SEED: u32 = 314;
 pub const HEAD_Y: f64 = 0.36; // over most grass tips (blades reach 0.39) so they don't flicker across it; also scales the sway
 pub const HEAD_R: f64 = 0.1; // ~3 art pixels
@@ -24,15 +23,20 @@ pub struct Head {
 }
 
 pub fn place_flowers(layout: &Layout) -> Vec<Head> {
-    let mut rng = Mulberry32::new(SEED);
-    let mut rand = move || rng.next();
     let mask = CanopyMask::new(&layout.trees);
+    place_in(&mut Mulberry32::new(SEED), &mask, &layout.rocks, Area { x: 0.0, z: 0.0, size: SIZE }, ATTEMPTS)
+}
+
+/// Heads over one square, darts from the stream `rng`; colours continue the same stream.
+pub fn place_in(rng: &mut Mulberry32, mask: &CanopyMask, rocks: &[Rock], area: Area, attempts: u32) -> Vec<Head> {
+    let mut rand = || rng.next();
+    let half = area.size / 2.0 - 0.1; // just inside the square
     let mut heads = Vec::new();
-    for _ in 0..ATTEMPTS {
-        let x = (rand() * 2.0 - 1.0) * HALF;
-        let z = (rand() * 2.0 - 1.0) * HALF;
+    for _ in 0..attempts {
+        let x = area.x + (rand() * 2.0 - 1.0) * half;
+        let z = area.z + (rand() * 2.0 - 1.0) * half;
         let patch = smoothstep(fbm(x * 0.3 + 200.0, z * 0.3), 0.7, 0.74);
-        if rand() > patch * grass_density(x, z, &mask, &layout.rocks) || mask.covers(x, z) {
+        if rand() > patch * grass_density(x, z, mask, rocks) || mask.covers(x, z) {
             continue;
         }
         heads.push(Head { x, y: height_at(x, z) + HEAD_Y, z, color: 0, shade: 0.0 });

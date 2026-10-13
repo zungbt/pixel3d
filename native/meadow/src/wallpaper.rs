@@ -1,5 +1,6 @@
-//! Wallpaper mode (Windows): the meadow lives behind the desktop icons, pauses while a maximised
-//! or fullscreen window hides the desktop, and a tray icon offers the settings, autostart and exit.
+//! Wallpaper mode (Windows): the meadow lives behind the desktop icons, a window per monitor (or
+//! the primary's only), each pausing while a maximised or fullscreen window hides it, and a tray
+//! icon offers the settings, autostart and exit.
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,8 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, GetStockObject, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromWindow, ScreenToClient,
+    BLACK_BRUSH, EnumDisplayMonitors, GetMonitorInfoW, GetStockObject, HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFO,
+    MonitorFromWindow, ScreenToClient,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
@@ -22,6 +24,8 @@ use windows_sys::core::BOOL;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
 use winit::window::{Window, WindowAttributes};
+
+use crate::render::Screen;
 
 pub const CHECK_EVERY: Duration = Duration::from_secs(1);
 // At login Explorer may not have built the desktop yet; after this long we give up and open a
@@ -55,8 +59,48 @@ struct Tray {
     exit: MenuItem,
 }
 
+/// A monitor's handle and rectangle (physical px: the process is per-monitor DPI aware).
+#[derive(Clone, Copy)]
+pub struct Monitor {
+    handle: HMONITOR,
+    rect: RECT,
+}
+
+impl PartialEq for Monitor {
+    fn eq(&self, o: &Self) -> bool {
+        let (a, b) = (self.rect, o.rect);
+        self.handle == o.handle && (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom)
+    }
+}
+
+impl std::fmt::Debug for Monitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let r = self.rect;
+        write!(f, "{}x{}@{},{}", r.right - r.left, r.bottom - r.top, r.left, r.top)
+    }
+}
+
+/// Every monitor, the primary first, then top to bottom and left to right.
+pub fn monitors() -> Vec<Monitor> {
+    let mut found: Vec<(bool, Monitor)> = Vec::new();
+    unsafe { EnumDisplayMonitors(null_mut(), null(), Some(add_monitor), &mut found as *mut _ as LPARAM) };
+    found.sort_by_key(|(primary, m)| (!primary, m.rect.top, m.rect.left));
+    found.into_iter().map(|(_, m)| m).collect()
+}
+
+unsafe extern "system" fn add_monitor(handle: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+    unsafe {
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+        if GetMonitorInfoW(handle, &mut info) != 0 {
+            (*(out as *mut Vec<(bool, Monitor)>)).push((info.dwFlags & MONITORINFOF_PRIMARY != 0, Monitor { handle, rect: info.rcMonitor }));
+        }
+        1
+    }
+}
+
 pub struct Desktop {
-    host: HWND, // our window's parent behind the icons; null until attached
+    host: HWND, // our windows' parent behind the icons, over the monitors they cover; null until attached
+    monitors: Vec<Monitor>, // the ones our windows cover, the primary first
     tray: Option<Tray>,
     since: Instant, // when we started looking for the desktop
     pub next_check: Instant,
@@ -66,7 +110,7 @@ pub struct Desktop {
 impl Desktop {
     pub fn new() -> Self {
         let now = Instant::now();
-        Desktop { host: null_mut(), tray: None, since: now, next_check: now, fallback: false }
+        Desktop { host: null_mut(), monitors: Vec::new(), tray: None, since: now, next_check: now, fallback: false }
     }
 
     /// Call once the event loop runs (the tray needs its message pump).
@@ -75,11 +119,12 @@ impl Desktop {
             return;
         }
         let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
-        let groups: [(&str, Vec<(String, Setting)>); 4] = [
+        let groups: [(&str, Vec<(String, Setting)>); 5] = [
             ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
             ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
             ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
             ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
+            ("Màn hình", vec![("Tất cả màn hình".into(), Setting::AllScreens(true)), ("Chỉ màn hình chính".into(), Setting::AllScreens(false))]),
         ];
         let menu = Menu::new();
         let mut choices = Vec::new();
@@ -133,17 +178,37 @@ impl Desktop {
         unsafe { IsWindow(self.host) != 0 }
     }
 
-    /// Our window was destroyed (Explorer restarted): look for the desktop afresh.
+    /// Our windows were destroyed (Explorer restarted), or the monitors changed and they were
+    /// closed: take the host down too and look for the desktop afresh.
     pub fn lost(&mut self) {
+        if !self.host.is_null() {
+            unsafe { DestroyWindow(self.host) }; // fails harmlessly if Explorer took it already
+        }
         self.host = null_mut();
         self.since = Instant::now();
     }
 
-    /// Attributes for a window behind the desktop icons, or None while there's no desktop yet;
-    /// past ATTACH_TIMEOUT this switches to `fallback` (a normal window) and logs why.
-    pub fn window_attributes(&mut self) -> Option<WindowAttributes> {
+    /// True when monitors came or went or moved since our windows were opened.
+    pub fn monitors_changed(&self, all_screens: bool) -> bool {
+        let now = monitors();
+        self.monitors != if all_screens { now } else { now.into_iter().take(1).collect() }
+    }
+
+    /// Which of our monitors a maximised or fullscreen window hides, in our windows' order.
+    pub fn covered(&self) -> Vec<bool> {
+        let mut covered = (self.monitors.clone(), vec![false; self.monitors.len()]);
+        unsafe { EnumWindows(Some(check_covering), &mut covered as *mut _ as LPARAM) };
+        covered.1
+    }
+
+    /// A window behind the desktop icons for each monitor (only the primary, unless `all_screens`)
+    /// and where it sits, or None while there's no desktop yet; past ATTACH_TIMEOUT this switches
+    /// to `fallback` (a normal window) and logs why.
+    pub fn window_attributes(&mut self, all_screens: bool) -> Option<Vec<(WindowAttributes, Screen)>> {
         if self.host.is_null() || unsafe { IsWindow(self.host) } == 0 {
-            self.host = create_host().unwrap_or(null_mut());
+            self.monitors = monitors();
+            self.monitors.truncate(if all_screens { self.monitors.len() } else { 1 });
+            self.host = create_host(bounds(&self.monitors)).unwrap_or(null_mut());
         }
         if self.host.is_null() {
             if self.since.elapsed() > ATTACH_TIMEOUT {
@@ -152,25 +217,38 @@ impl Desktop {
             }
             return None;
         }
-        log::info!("attached behind the desktop icons");
-        let (w, h) = screen_size();
+        log::info!("attached behind the desktop icons on {:?}", self.monitors);
+        let host = bounds(&self.monitors);
+        let primary = self.monitors[0].rect;
         let parent = RawWindowHandle::Win32(Win32WindowHandle::new((self.host as isize).try_into().expect("host hwnd")));
-        let attrs = Window::default_attributes()
-            .with_title("meadow")
-            .with_decorations(false)
-            .with_position(PhysicalPosition::new(0, 0))
-            .with_inner_size(PhysicalSize::new(w as u32, h as u32));
-        // SAFETY: the host is a live window of this thread (checked just above).
-        Some(unsafe { attrs.with_parent_window(Some(parent)) })
+        let windows = self.monitors.iter().map(|m| {
+            let r = m.rect;
+            let size = ((r.right - r.left) as u32, (r.bottom - r.top) as u32);
+            let attrs = Window::default_attributes()
+                .with_title("meadow")
+                .with_decorations(false)
+                .with_position(PhysicalPosition::new(r.left - host.left, r.top - host.top))
+                .with_inner_size(PhysicalSize::new(size.0, size.1));
+            // SAFETY: the host is a live window of this thread (checked just above).
+            let attrs = unsafe { attrs.with_parent_window(Some(parent)) };
+            (attrs, Screen { offset: (r.left - primary.left, r.top - primary.top), size })
+        });
+        Some(windows.collect())
     }
 }
 
-fn screen_size() -> (i32, i32) {
-    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+/// The rectangle around these monitors.
+fn bounds(monitors: &[Monitor]) -> RECT {
+    monitors.iter().fold(monitors[0].rect, |a, m| RECT {
+        left: a.left.min(m.rect.left),
+        top: a.top.min(m.rect.top),
+        right: a.right.max(m.rect.right),
+        bottom: a.bottom.max(m.rect.bottom),
+    })
 }
 
-/// Makes the screen-sized window our window goes into, behind the desktop icons.
-fn create_host() -> Option<HWND> {
+/// Makes the window over `area` (screen px) that our windows go into, behind the desktop icons.
+fn create_host(area: RECT) -> Option<HWND> {
     unsafe {
         let progman = FindWindowW(wide("Progman").as_ptr(), null());
         if progman.is_null() {
@@ -212,9 +290,9 @@ fn create_host() -> Option<HWND> {
             ..Default::default()
         };
         RegisterClassW(&wc); // fails harmlessly when already registered
-        let mut origin = POINT { x: 0, y: 0 };
+        let mut origin = POINT { x: area.left, y: area.top };
         ScreenToClient(parent, &mut origin);
-        let (w, h) = screen_size();
+        let (w, h) = (area.right - area.left, area.bottom - area.top);
         let host = CreateWindowExW(ex_style, class.as_ptr(), null(), WS_CHILD | WS_VISIBLE, origin.x, origin.y, w, h, parent, null_mut(), instance, null());
         if host.is_null() {
             log::warn!("desktop host window: error {}", GetLastError());
@@ -244,30 +322,22 @@ pub fn trim_memory() {
     unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
 }
 
-/// True when a maximised window, or a fullscreen foreground one, hides the desktop on the primary
-/// screen (the only one the meadow covers).
-pub fn desktop_covered() -> bool {
-    let mut covered = false;
-    unsafe { EnumWindows(Some(check_covering), &mut covered as *mut bool as LPARAM) };
-    covered
-}
-
+// For Desktop::covered: marks the monitor a maximised window, or a fullscreen foreground one, hides.
 unsafe extern "system" fn check_covering(hwnd: HWND, out: LPARAM) -> BOOL {
     unsafe {
+        let (monitors, covered) = &mut *(out as *mut (Vec<Monitor>, Vec<bool>));
         if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || cloaked(hwnd) || is_shell(hwnd) {
             return 1;
         }
-        // A window maximised on another monitor doesn't hide the meadow.
-        if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) {
-            return 1;
-        }
+        // Only the monitor the window is mostly on; one we don't cover doesn't count.
+        let on = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+        let Some(i) = monitors.iter().position(|m| m.handle == on) else { return 1 };
         let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetWindowRect(hwnd, &mut r);
-        let (w, h) = screen_size();
-        let fullscreen = hwnd == GetForegroundWindow() && r.left <= 0 && r.top <= 0 && r.right >= w && r.bottom >= h;
+        let m = monitors[i].rect;
+        let fullscreen = hwnd == GetForegroundWindow() && r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
         if IsZoomed(hwnd) != 0 || fullscreen {
-            *(out as *mut bool) = true;
-            return 0;
+            covered[i] = true;
         }
         1
     }

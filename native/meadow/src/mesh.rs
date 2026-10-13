@@ -19,15 +19,31 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
+impl MeshData {
+    /// Adds another mesh's triangles, so both go in one draw.
+    pub fn append(&mut self, other: MeshData) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend(other.vertices);
+        self.indices.extend(other.indices.into_iter().map(|i| i + base));
+    }
+}
+
 /// The terrain, with smooth normals (no faceted bands) and soft light/dark tint patches.
 pub fn ground() -> MeshData {
-    use world::{GROUND_CELL, GROUND_SIZE};
-    let n = (GROUND_SIZE / GROUND_CELL) as u32;
+    use world::GROUND_SIZE;
+    ground_square(-GROUND_SIZE / 2.0, -GROUND_SIZE / 2.0, GROUND_SIZE)
+}
+
+/// The terrain over the square from (x0, z0), `size` wide, on the same grid as ground() so their
+/// edges meet.
+pub fn ground_square(x0: f64, z0: f64, size: f64) -> MeshData {
+    use world::GROUND_CELL;
+    let n = (size / GROUND_CELL) as u32;
     let mut vertices = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
     for j in 0..=n {
         for i in 0..=n {
-            let x = -GROUND_SIZE / 2.0 + i as f64 * GROUND_CELL;
-            let z = -GROUND_SIZE / 2.0 + j as f64 * GROUND_CELL;
+            let x = x0 + i as f64 * GROUND_CELL;
+            let z = z0 + j as f64 * GROUND_CELL;
             let e = GROUND_CELL / 2.0;
             let dx = world::height_at(x + e, z) - world::height_at(x - e, z);
             let dz = world::height_at(x, z + e) - world::height_at(x, z - e);

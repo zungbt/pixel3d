@@ -14,5 +14,6 @@ pub mod rng;
 pub mod settings;
 pub mod sky;
 pub mod sun;
+pub mod tiles;
 pub mod world;
 pub mod wreck;

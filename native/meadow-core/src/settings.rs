@@ -14,6 +14,7 @@ pub struct Settings {
     pub fog: Fog,
     pub show_clock: bool, // the post clock beside the path
     pub broken_at: Option<i64>, // unix s the post clock was turned off (its pieces' age)
+    pub all_screens: bool, // wallpaper: the meadow runs across every monitor; false: the primary only
 }
 
 /// One changed setting, as the tray menu sends it.
@@ -25,6 +26,7 @@ pub enum Setting {
     Fog(Fog),
     ShowClock(bool),
     BrokenAt(i64),
+    AllScreens(bool),
 }
 
 // The value of `key` in settings.txt's text: its first line that isn't a comment.
@@ -53,6 +55,7 @@ impl Settings {
             },
             show_clock: get("showClock") != Some("false"),
             broken_at: get("brokenAt").and_then(|v| v.parse().ok()),
+            all_screens: get("screens") != Some("primary"),
         }
     }
 
@@ -64,6 +67,7 @@ impl Settings {
             Setting::Fog(fog) => self.fog = fog,
             Setting::ShowClock(on) => self.show_clock = on,
             Setting::BrokenAt(t) => self.broken_at = Some(t),
+            Setting::AllScreens(on) => self.all_screens = on,
         }
     }
 }
@@ -77,6 +81,7 @@ impl Setting {
             Setting::Fog(fog) => ("fog", ["off", "auto", "always"][fog as usize].to_string()),
             Setting::ShowClock(on) => ("showClock", on.to_string()),
             Setting::BrokenAt(t) => ("brokenAt", t.to_string()),
+            Setting::AllScreens(on) => ("screens", if on { "all" } else { "primary" }.to_string()),
         }
     }
 }
@@ -105,7 +110,7 @@ pub fn save(text: &str, setting: Setting) -> String {
 mod tests {
     use super::*;
 
-    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None };
+    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None, all_screens: true };
 
     #[test]
     fn an_empty_file_gives_the_defaults() {
@@ -115,15 +120,15 @@ mod tests {
 
     #[test]
     fn unexpected_stored_values_fall_back() {
-        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\n";
+        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\nscreens = 2\n";
         assert_eq!(Settings::load(text), DEFAULTS);
     }
 
     #[test]
     fn saved_values_load_back() {
-        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000)];
+        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000), Setting::AllScreens(false)];
         let text = changes.iter().fold(String::new(), |text, &s| save(&text, s));
-        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000) });
+        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000), all_screens: false });
         let mut set = DEFAULTS;
         changes.iter().for_each(|&s| set.set(s));
         assert_eq!(set, Settings::load(&text), "set agrees with save + load");

@@ -1,10 +1,11 @@
 //! The three passes: sun shadow map → lit scene at art resolution (colour + view normals + depth)
-//! → upscale to the window with pixel outlines.
+//! → upscale to the window with pixel outlines; once per screen, each looking at its own part of
+//! one shared meadow.
 use std::borrow::Cow;
 use std::fmt::Write;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::dragonflies::{self, Dragonflies};
@@ -14,12 +15,13 @@ use meadow_core::gnats::{self, Gnats};
 use meadow_core::flowers::{self, HEAD_R, HEAD_Y};
 use meadow_core::flight::V3;
 use meadow_core::sky::{self, SkyState};
+use meadow_core::tiles::{self, Outer, TILE};
 use meadow_core::world;
-use meadow_core::grass::BLADE_H;
+use meadow_core::grass::{self as blades, BLADE_H};
 use meadow_core::wreck;
 use wgpu::util::DeviceExt;
 
-use crate::camera;
+use crate::camera::{self, Pane};
 use crate::grass::{self, Grass};
 use crate::mesh::{self, MeshData, Vertex};
 
@@ -302,10 +304,33 @@ struct Targets {
     post: wgpu::BindGroup,
 }
 
-pub struct Renderer {
-    globals: Globals,
+/// A screen in physical px: its top-left corner relative to the primary's, and its size. The first
+/// one is the primary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Screen {
+    pub offset: (i32, i32),
+    pub size: (u32, u32),
+}
+
+// How far past a pane the world must exist: a crown standing just below the bottom edge still
+// reaches into it.
+const PANE_REACH: f32 = 2.5;
+
+// One screen's camera, uniforms, targets and grass. The scene and the shadow map are shared.
+struct View {
+    offset: (i32, i32),
+    art: (u32, u32),
+    pane: Pane,
     globals_buf: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
+    post_buf: wgpu::Buffer,
+    targets: Targets,
+    grass: Grass,
+}
+
+pub struct Renderer {
+    globals: Globals, // the shared part; each view adds its cameras
+    sun: Vec3,
     background: Vec3, // this frame's sky: the scene pass's clear colour
     shadow_view: wgpu::TextureView,
     shadow_group: wgpu::BindGroup,
@@ -317,10 +342,10 @@ pub struct Renderer {
     grass_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
-    post_buf: wgpu::Buffer,
     manual_srgb: bool,
     draws: Vec<Draw>,
-    grass: Grass,
+    views: Vec<View>,
+    primary: (u32, u32), // the primary screen's size, which every pane is measured from
     butterflies: Butterflies,
     butterfly_body: Draw,  // 12 instances, rewritten every frame
     butterfly_wings: Draw, // 24: left and right of each
@@ -337,7 +362,6 @@ pub struct Renderer {
     post_clock: PostClock,
     frog: Frog,
     frog_draw: Draw,
-    targets: Targets,
     pixel_size: u32,
 }
 
@@ -484,14 +508,23 @@ fn upload(device: &wgpu::Device, mesh: MeshData, instances: &[Instance], shade: 
     }
 }
 
-// Every mesh in the meadow, as instanced draws.
-fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers::Head]) -> Vec<Draw> {
+// Every mesh in the meadow, as instanced draws: the inner world, then the outer tiles' (other
+// screens').
+fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers::Head], outer: &Outer, tiles: &[(i32, i32)]) -> Vec<Draw> {
     log::info!("layout: {} trees, {} rocks, {} flowers", layout.trees.len(), layout.rocks.len(), flowers.len());
+    if !tiles.is_empty() {
+        log::info!("outer tiles {tiles:?}: {} trees, {} rocks, {} flowers", outer.trees.len(), outer.rocks.len(), outer.flowers.len());
+    }
+    let mut ground = mesh::ground();
+    for &(i, j) in tiles {
+        ground.append(mesh::ground_square(i as f64 * TILE, j as f64 * TILE, TILE));
+    }
     let pond = |lift: f64| Mat4::from_translation(Vec3::new(world::POND_X as f32, (world::shore_y() + lift) as f32, world::POND_Z as f32));
     let at = |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
     let trunks: Vec<_> = layout
         .trees
         .iter()
+        .chain(&outer.trees)
         .map(|t| {
             let m = at(t.x, t.y + t.height / 2.0, t.z) * Mat4::from_scale(Vec3::new(1.0, t.height as f32, 1.0));
             Instance::swaying(m, TRUNK, t)
@@ -500,11 +533,13 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
     let crowns: Vec<_> = layout
         .trees
         .iter()
+        .chain(&outer.trees)
         .map(|t| Instance::swaying(at(t.x, t.y + t.height + 0.3, t.z) * Mat4::from_scale(Vec3::splat(t.canopy as f32)), LEAVES, t))
         .collect();
     let rocks: Vec<_> = layout
         .rocks
         .iter()
+        .chain(&outer.rocks)
         .map(|r| {
             let m = at(r.x, r.y, r.z) * Mat4::from_rotation_y(r.rot_y as f32) * Mat4::from_scale(Vec3::new(r.r as f32, r.sy as f32, r.r as f32));
             Instance::new(m, ROCK)
@@ -525,9 +560,9 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
     for v in &mut head.vertices {
         v.pos = (Vec3::from(v.pos) * HEAD_R as f32 + Vec3::Y * HEAD_Y as f32).into();
     }
-    let heads: Vec<_> = flowers.iter().map(|h| Instance::in_wind(at(h.x, h.y - HEAD_Y, h.z), linear(h.color) * h.shade as f32)).collect();
+    let heads: Vec<_> = flowers.iter().chain(&outer.flowers).map(|h| Instance::in_wind(at(h.x, h.y - HEAD_Y, h.z), linear(h.color) * h.shade as f32)).collect();
     vec![
-        upload(device, mesh::ground(), &[Instance::new(Mat4::IDENTITY, GROUND)], Shade::Ground, false),
+        upload(device, ground, &[Instance::new(Mat4::IDENTITY, GROUND)], Shade::Ground, false),
         upload(device, mesh::fan(world::sand_radius), &[Instance::new(pond(0.01), SAND)], Shade::Toon, false),
         upload(device, mesh::fan(world::pond_radius), &[Instance::new(pond(0.02), 0xffffff)], Shade::Water, false),
         upload(device, mesh::trunk(), &trunks, Shade::Toon, true),
@@ -536,6 +571,15 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
         upload(device, mesh::sector(0.0, frog::PAD_R as f32, std::f32::consts::TAU - 0.5, 12), &pads, Shade::Toon, false),
         upload(device, head, &heads, Shade::Toon, false),
     ]
+}
+
+/// The ground under a pane and PANE_REACH past it: where the world must have something.
+fn footprint(pane: Pane, art: (u32, u32)) -> [[f64; 2]; 4] {
+    let half = pane.half(art) + Vec2::splat(PANE_REACH);
+    [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(sx, sy)| {
+        let p = camera::ground_at(pane.centre + half * Vec2::new(sx, sy));
+        [p.x as f64, p.z as f64]
+    })
 }
 
 /// The frog in cubes (FROG_PARTS of them), facing +z from between its feet; hidden parts get a
@@ -580,7 +624,8 @@ fn art_size(width: u32, height: u32, pixel_size: u32) -> (u32, u32) {
 }
 
 impl Renderer {
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat, width: u32, height: u32, pixel_size: u32) -> Self {
+    /// The meadow for these screens (the first is the primary); `resize` each view before drawing.
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat, screens: &[Screen], pixel_size: u32) -> Self {
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
             entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
@@ -607,17 +652,6 @@ impl Renderer {
             ],
         });
 
-        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("globals"),
-            size: size_of::<Globals>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
-        });
         // The shadow pass binds globals only: the shadow map can't be sampled while it's the target.
         let shadow_view = texture(device, "shadow map", (SHADOW_SIZE, SHADOW_SIZE), DEPTH_FORMAT);
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -683,17 +717,11 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let post_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("post"),
-            size: size_of::<PostParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         let ground = linear(HEMI_GROUND.0) * HEMI_GROUND.1;
         // The time-of-day fields are set by set_sky, before every upload.
         let globals = Globals {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(), // set by resize
+            view_proj: Mat4::IDENTITY.to_cols_array_2d(), // each view's
             view: camera::view().to_cols_array_2d(),
             hemi_ground: ground.extend(0.0).into(),
             ..Zeroable::zeroed()
@@ -706,11 +734,53 @@ impl Renderer {
         let n_dragonflies = dragonflies.poses().len();
         let n_gnats = gnats.poses().len();
         let blank = |n| vec![Instance::new(Mat4::IDENTITY, 0); n]; // posed before the first draw
-        let targets = Self::targets(device, &post_layout, &post_buf, art_size(width, height, pixel_size));
-        let mut renderer = Self {
+        // The other screens look past the inner ground: the world grows tiles under them.
+        let primary_art = art_size(screens[0].size.0, screens[0].size.1, pixel_size);
+        let panes: Vec<(Pane, (u32, u32))> = screens
+            .iter()
+            .map(|sc| {
+                let art = art_size(sc.size.0, sc.size.1, pixel_size);
+                (Pane::new(art, sc.offset, primary_art, pixel_size), art)
+            })
+            .collect();
+        let footprints: Vec<[[f64; 2]; 4]> = panes.iter().map(|(pane, art)| footprint(*pane, *art)).collect();
+        let tiles = tiles::needed(&footprints, 0.0);
+        let start = std::time::Instant::now();
+        let mut outer = tiles::place_outer(&tiles);
+        let mut all_blades = blades::place_grass(&world_layout);
+        log::info!("{} grass blades, {} more on {} outer tiles, placed in {:.0} ms", all_blades.len(), outer.blades.len(), tiles.len(), start.elapsed().as_secs_f64() * 1000.0);
+        all_blades.append(&mut outer.blades);
+        let views = screens
+            .iter()
+            .zip(&panes)
+            .map(|(sc, &(pane, art))| {
+                let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("globals"),
+                    size: size_of::<Globals>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("globals"),
+                    layout: &globals_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
+                });
+                let post_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("post"),
+                    size: size_of::<PostParams>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                // A little taller than now, so a new pixel size (which moves the art grid by less
+                // than an art pixel) still finds its rows.
+                let grass = Grass::new(device, &all_blades, pane, pane.half(art).y + 4.0 * pane.unit);
+                View { offset: sc.offset, art, pane, globals_group, targets: Self::targets(device, &post_layout, &post_buf, art), globals_buf, post_buf, grass }
+            })
+            .collect();
+        drop(all_blades);
+        Self {
             globals,
-            globals_buf,
-            globals_group,
+            sun: Vec3::Y,
             background: Vec3::ZERO,
             shadow_view,
             shadow_group,
@@ -722,10 +792,10 @@ impl Renderer {
             grass_pipeline,
             post_pipeline,
             post_layout,
-            post_buf,
             manual_srgb: !surface_format.is_srgb(),
-            draws: build_draws(device, &world_layout, &flowers),
-            grass: Grass::new(device, &world_layout),
+            draws: build_draws(device, &world_layout, &flowers, &outer, &tiles),
+            views,
+            primary: screens[0].size,
             butterfly_body: upload(device, mesh::cube(), &blank(butterflies::COUNT), Shade::Insect, false),
             butterfly_wings: upload(device, mesh::wing(), &blank(butterflies::COUNT * 2), Shade::Insect, false),
             butterflies,
@@ -742,11 +812,8 @@ impl Renderer {
             post_clock: PostClock::new(device, &world_layout),
             frog: Frog::new(),
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
-            targets,
             pixel_size,
-        };
-        renderer.set_camera(art_size(width, height, pixel_size));
-        renderer
+        }
     }
 
     fn targets(device: &wgpu::Device, post_layout: &wgpu::BindGroupLayout, post_buf: &wgpu::Buffer, art: (u32, u32)) -> Targets {
@@ -766,16 +833,11 @@ impl Renderer {
         Targets { color, normal, depth, post }
     }
 
-    fn set_camera(&mut self, (w, h): (u32, u32)) {
-        self.globals.view_proj = (camera::projection(w, h) * camera::view()).to_cols_array_2d();
-        self.grass.set_view((w, h));
-    }
-
     /// This frame's time of day: lights, shadow camera, water tint, ground fog and the sky colour.
     fn set_sky(&mut self, sky: &SkyState) {
         let sun = vec3(sky.sun_pos);
+        self.sun = sun;
         self.globals.sun_dir = sun.normalize().extend(0.0).into();
-        self.globals.light_view_proj = camera::light_view_proj(sun).to_cols_array_2d();
         self.globals.sun_color = vec3(sky.sun_color).extend(0.0).into();
         self.globals.hemi_sky = vec3(sky.hemi_sky).extend(0.0).into();
         self.background = vec3(sky.background);
@@ -784,19 +846,26 @@ impl Renderer {
         self.globals.fog = vec3(sky.fog_color).extend(sky.fog as f32).into();
     }
 
-    /// Takes effect with the next resize.
+    /// Takes effect with the next resize of each view.
     pub fn set_pixel_size(&mut self, pixel_size: u32) {
         self.pixel_size = pixel_size;
     }
 
-    /// New window size (never 0): rebuilds the art targets, the post bind group and the camera together.
-    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
-        let art = art_size(width, height, self.pixel_size);
-        self.targets = Self::targets(device, &self.post_layout, &self.post_buf, art);
-        self.set_camera(art);
-        let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32 };
-        queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&params));
-        log::info!("art {}x{} at pixel size {}, {} grass blades drawn", art.0, art.1, self.pixel_size, self.grass.count);
+    /// New window size for view `i` (never 0): rebuilds its art targets, post bind group and camera
+    /// together. The primary's (view 0's) size sets the others' scale: resize it first.
+    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, width: u32, height: u32) {
+        if i == 0 {
+            self.primary = (width, height);
+        }
+        let primary_art = art_size(self.primary.0, self.primary.1, self.pixel_size);
+        let view = &mut self.views[i];
+        view.art = art_size(width, height, self.pixel_size);
+        view.pane = Pane::new(view.art, view.offset, primary_art, self.pixel_size);
+        view.targets = Self::targets(device, &self.post_layout, &view.post_buf, view.art);
+        view.grass.set_view(view.pane, view.art);
+        let params = PostParams { art: [view.art.0, view.art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32 };
+        queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
+        log::info!("view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn", view.art.0, view.art.1, self.pixel_size, view.pane.centre, view.grass.count);
     }
 
     /// Every insect one step on (in the web's species order) and at its pose for this frame.
@@ -856,16 +925,26 @@ impl Renderer {
         queue.write_buffer(&self.frog_draw.instances, 0, bytemuck::cast_slice(&parts));
     }
 
-    /// One frame at animation time `time` (s), `dt` after the last drawn one, with the post clock
-    /// as `clock`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, out: &wgpu::TextureView, time: f64, dt: f64, sky: &SkyState, clock: &ClockPose) {
+    /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, with the
+    /// post clock as `clock`. Once per frame, before rendering the views.
+    pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, sky: &SkyState, clock: &ClockPose) {
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
         self.globals.params[0] = time as f32;
         self.globals.params[1] = dial_glow(sky) * clock.glow as f32;
-        queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+    }
+
+    /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),
+    /// scene and post.
+    pub fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, out: &wgpu::TextureView) {
+        let view = &self.views[i];
+        let globals = Globals {
+            view_proj: (camera::projection(view.art, view.pane) * camera::view()).to_cols_array_2d(),
+            light_view_proj: camera::light_view_proj(self.sun, view.pane.ground_centre()).to_cols_array_2d(),
+            ..self.globals
+        };
+        queue.write_buffer(&view.globals_buf, 0, bytemuck::bytes_of(&globals));
         let mut encoder = device.create_command_encoder(&Default::default());
         let depth_attachment = |view| {
             Some(wgpu::RenderPassDepthStencilAttachment {
@@ -902,7 +981,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_bind_group(0, &self.globals_group, &[]);
+            pass.set_bind_group(0, &view.globals_group, &[]);
             for d in self.draws.iter().chain(&self.post_clock.draws).chain([&self.frog_draw]).filter(|d| d.casts_shadow) {
                 draw(&mut pass, d);
             }
@@ -913,15 +992,15 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[
-                    color_attachment(&self.targets.color, self.background.extend(1.0)),
-                    color_attachment(&self.targets.normal, up.extend(1.0)),
+                    color_attachment(&view.targets.color, self.background.extend(1.0)),
+                    color_attachment(&view.targets.normal, up.extend(1.0)),
                 ],
-                depth_stencil_attachment: depth_attachment(&self.targets.depth),
+                depth_stencil_attachment: depth_attachment(&view.targets.depth),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.globals_group, &[]);
+            pass.set_bind_group(0, &view.globals_group, &[]);
             pass.set_bind_group(1, &self.shadow_group, &[]);
             let insects = [&self.frog_draw, &self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
             for d in self.draws.iter().chain(&self.post_clock.draws).chain(insects) {
@@ -936,8 +1015,8 @@ impl Renderer {
                 draw(&mut pass, d);
             }
             pass.set_pipeline(&self.grass_pipeline);
-            pass.set_vertex_buffer(0, self.grass.instances.slice(..));
-            pass.draw(0..3, 0..self.grass.count);
+            pass.set_vertex_buffer(0, view.grass.instances.slice(..));
+            pass.draw(0..3, 0..view.grass.count);
             pass.set_pipeline(&self.glow_pipeline);
             draw(&mut pass, &self.firefly_draw);
         }
@@ -951,7 +1030,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.post_pipeline);
-            pass.set_bind_group(0, &self.targets.post, &[]);
+            pass.set_bind_group(0, &view.targets.post, &[]);
             pass.draw(0..3, 0..1);
         }
         queue.submit([encoder.finish()]);
