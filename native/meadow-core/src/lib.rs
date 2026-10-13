@@ -1,6 +1,7 @@
 //! The meadow without a GPU: seeded layout, terrain and frame pacing, tested on the Linux host.
 pub mod butterflies;
 pub mod clock;
+pub mod clouds;
 pub mod dragonflies;
 pub mod fireflies;
 pub mod flight;
