@@ -206,20 +206,52 @@ pub fn place(seed: u32) -> Layout {
     place_with(seed, &height_at)
 }
 
+/// A square placement area: centre and side length.
+#[derive(Clone, Copy)]
+pub struct Area {
+    pub x: f64,
+    pub z: f64,
+    pub size: f64,
+}
+
+/// The inner placement area: SIZE less the 1.5 inset each side the spread always had.
+pub const INNER: Area = Area { x: 0.0, z: 0.0, size: SIZE - 3.0 };
+
+/// Attempt and count limits, scaled from the inner area by area ratio (rounded).
+pub struct Limits {
+    pub attempts: usize,
+    pub trees: usize,
+    pub clusters: usize,
+    pub cluster_attempts: usize,
+}
+
+pub const INNER_LIMITS: Limits = Limits { attempts: 4000, trees: 120, clusters: 12, cluster_attempts: 500 };
+
+pub fn scaled_limits(area: Area) -> Limits {
+    let r = area.size / INNER.size;
+    let k = r * r;
+    let s = |n: usize| (n as f64 * k).round() as usize;
+    Limits { attempts: s(INNER_LIMITS.attempts), trees: s(INNER_LIMITS.trees), clusters: s(INNER_LIMITS.clusters), cluster_attempts: s(INNER_LIMITS.cluster_attempts) }
+}
+
 fn place_with(seed: u32, height: &dyn Fn(f64, f64) -> f64) -> Layout {
-    let mut rng = Mulberry32::new(seed);
-    let mut rand = move || rng.next();
-    let spread = |rand: &mut dyn FnMut() -> f64| (rand() - 0.5) * (SIZE - 3.0);
+    place_in(&mut Mulberry32::new(seed), height, INNER, &INNER_LIMITS)
+}
+
+/// Trees and rocks on one area; `rng` is advanced, so a caller can pass a seeded stream.
+pub fn place_in(rng: &mut Mulberry32, height: &dyn Fn(f64, f64) -> f64, area: Area, lim: &Limits) -> Layout {
+    let mut rand = || rng.next();
+    let spread = |rand: &mut dyn FnMut() -> f64, c: f64| c + (rand() - 0.5) * area.size;
     let too_close = |trees: &[Tree], x: f64, z: f64, min: f64| trees.iter().any(|t| hypot(t.x - x, t.z - z) < min);
 
     // Trees: groves where the forest mask is high, rare loners in clearings,
     // and a minimum spacing between trunks (dart throwing ≈ Poisson-disk).
     let mut trees: Vec<Tree> = Vec::new();
     let mut attempt = 0;
-    while attempt < 4000 && trees.len() < 120 {
+    while attempt < lim.attempts && trees.len() < lim.trees {
         attempt += 1;
-        let x = spread(&mut rand);
-        let z = spread(&mut rand);
+        let x = spread(&mut rand, area.x);
+        let z = spread(&mut rand, area.z);
         let forest = smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
         if rand() > forest.max(0.01) || too_close(&trees, x, z, 1.6) || sand_q(x, z) < 1.15 || main_path_edge(x, z) < 1.0 {
             continue;
@@ -234,10 +266,10 @@ fn place_with(seed: u32, height: &dyn Fn(f64, f64) -> f64) -> Layout {
     // The centre check uses the largest boulder radius, so every counted cluster keeps its boulder.
     let mut rocks = Vec::new();
     let (mut clusters, mut attempt) = (0, 0);
-    while clusters < 12 && attempt < 500 {
+    while clusters < lim.clusters && attempt < lim.cluster_attempts {
         attempt += 1;
-        let cx = spread(&mut rand);
-        let cz = spread(&mut rand);
+        let cx = spread(&mut rand, area.x);
+        let cz = spread(&mut rand, area.z);
         if rand() > 0.3 + slope_with(height, cx, cz) * 1.5
             || too_close(&trees, cx, cz, 1.5)
             || main_path_edge(cx, cz) < 0.9 + 0.15

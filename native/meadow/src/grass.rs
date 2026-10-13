@@ -1,14 +1,15 @@
 //! The grass on the GPU: one 20-byte instance per blade, drawn as one triangle that `vs_grass`
-//! builds from the vertex index (no vertex buffer). The camera never moves and the view is always
-//! VIEW_HEIGHT high, so the blades are sorted once (as the web's fitView) and a resize only
-//! changes how many are drawn.
+//! builds from the vertex index (no vertex buffer). The camera never moves and a pane's height
+//! only changes with the monitors, so each pane keeps the blades in its rows, sorted once (as the
+//! web's fitView), and a resize only changes how many are drawn.
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
-use meadow_core::grass::{self, Blade};
-use meadow_core::world;
+use glam::{Mat4, Vec2, Vec3};
+use meadow_core::grass::Blade;
+#[cfg(test)]
+use meadow_core::{grass, world};
 use wgpu::util::DeviceExt;
 
-use crate::camera;
+use crate::camera::{self, Pane};
 
 // Filled into the shader by render.rs.
 pub const BLADE_W: f64 = 0.1;
@@ -42,38 +43,38 @@ pub const BUFFERS: [Option<wgpu::VertexBufferLayout>; 1] =
 
 pub struct Grass {
     pub instances: wgpu::Buffer,
-    edges: Vec<f32>, // |view x| of the uploaded blades, ascending
-    pub count: u32,  // blades drawn: the first `count`, those inside the screen's sides
+    centre_x: f32,   // the pane's, in view space
+    edges: Vec<f32>, // |view x − centre_x| of the uploaded blades, ascending
+    pub count: u32,  // blades drawn: the first `count`, those inside the pane's sides
 }
 
 impl Grass {
-    pub fn new(device: &wgpu::Device, layout: &world::Layout) -> Self {
-        let start = std::time::Instant::now();
-        let blades = grass::place_grass(layout);
-        let (instances, edges) = sort_for_view(&blades, camera::view());
-        log::info!("grass: {} blades placed, {} kept in the screen's rows, in {:.0} ms", blades.len(), edges.len(), start.elapsed().as_secs_f64() * 1000.0);
+    /// The blades in the rows of a pane `half_h` high (world units).
+    pub fn new(device: &wgpu::Device, blades: &[Blade], pane: Pane, half_h: f32) -> Self {
+        let (instances, edges) = sort_for_view(blades, camera::view(), pane.centre, half_h);
+        log::info!("grass: {} of {} blades in the pane's rows", edges.len(), blades.len());
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grass"),
             contents: bytemuck::cast_slice(&instances),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        Self { instances: buffer, edges, count: 0 } // set_view sets the count
+        Self { instances: buffer, centre_x: pane.centre.x, edges, count: 0 } // set_view sets the count
     }
 
-    /// New art size: draw the blades inside the screen's sides.
-    pub fn set_view(&mut self, art: (u32, u32)) {
-        self.count = drawn(&self.edges, art);
+    /// New art size: draw the blades inside the pane's sides.
+    pub fn set_view(&mut self, pane: Pane, art: (u32, u32)) {
+        self.count = drawn(&self.edges, pane.half(art).x + (pane.centre.x - self.centre_x).abs());
     }
 }
 
-/// Drops the blades above or below the screen (at any window size) and sorts the rest by distance
-/// from the screen's vertical centre line. Returns the instances and their |view x|, ascending.
-fn sort_for_view(blades: &[Blade], view: Mat4) -> (Vec<GrassInstance>, Vec<f32>) {
+/// Drops the blades above or below the pane and sorts the rest by distance from its vertical
+/// centre line. Returns the instances and those distances, ascending.
+fn sort_for_view(blades: &[Blade], view: Mat4, centre: Vec2, half_h: f32) -> (Vec<GrassInstance>, Vec<f32>) {
     let mut kept: Vec<(f32, GrassInstance)> = blades
         .iter()
         .filter_map(|b| {
             let p = view.transform_point3(Vec3::new(b.x, b.y, b.z));
-            (p.y.abs() < camera::VIEW_HEIGHT / 2.0 + VIEW_MARGIN).then(|| (p.x.abs(), GrassInstance::new(b)))
+            ((p.y - centre.y).abs() < half_h + VIEW_MARGIN).then(|| ((p.x - centre.x).abs(), GrassInstance::new(b)))
         })
         .collect();
     kept.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -82,8 +83,7 @@ fn sort_for_view(blades: &[Blade], view: Mat4) -> (Vec<GrassInstance>, Vec<f32>)
 }
 
 // Uses the projection's own half width, so the culling and the camera can't disagree.
-fn drawn(edges: &[f32], (w, h): (u32, u32)) -> u32 {
-    let half_w = camera::half_width(w, h);
+fn drawn(edges: &[f32], half_w: f32) -> u32 {
     edges.partition_point(|&x| x < half_w + VIEW_MARGIN) as u32
 }
 
@@ -109,21 +109,23 @@ mod tests {
             .flat_map(|i| (-63..=63).map(move |j| Blade { x: i as f32 * 0.5, y: 0.0, z: j as f32 * 0.5, scale: 1.0, color: [0.5; 3], normal: [0.0, 1.0, 0.0] }))
             .collect();
         let view = camera::view();
-        let (instances, edges) = sort_for_view(&blades, view);
-        assert_eq!(instances.len(), edges.len());
-        assert!(edges.len() < blades.len(), "rows above and below the screen are dropped");
-        assert!(edges.windows(2).all(|w| w[0] <= w[1]));
-        for (inst, &edge) in instances.iter().zip(&edges) {
-            let p = view.transform_point3(Vec3::from(inst.pos));
-            assert!(p.y.abs() < camera::VIEW_HEIGHT / 2.0 + VIEW_MARGIN);
-            assert_eq!(p.x.abs(), edge);
+        for centre in [Vec2::ZERO, Vec2::new(4.0, -15.0)] {
+            let (instances, edges) = sort_for_view(&blades, view, centre, 6.75);
+            assert_eq!(instances.len(), edges.len());
+            assert!(edges.len() < blades.len(), "rows above and below the pane are dropped");
+            assert!(edges.windows(2).all(|w| w[0] <= w[1]));
+            for (inst, &edge) in instances.iter().zip(&edges) {
+                let p = view.transform_point3(Vec3::from(inst.pos));
+                assert!((p.y - centre.y).abs() < 6.75 + VIEW_MARGIN);
+                assert_eq!((p.x - centre.x).abs(), edge);
+            }
         }
     }
 
     #[test]
     fn drawn_count_follows_the_aspect() {
         let edges: Vec<f32> = (0..4000).map(|i| i as f32 * 0.01).collect(); // |view x| 0..40
-        let count = |w, h| drawn(&edges, (w, h));
+        let count = |w, h| drawn(&edges, camera::half_width(w, h));
         // Wider draws more (4:3 < 16:10 < 16:9 < 21:9); only the aspect matters, not the size.
         assert!(count(640, 480) < count(640, 400) && count(640, 400) < count(640, 360) && count(640, 360) < count(840, 360));
         assert_eq!(count(640, 360), count(960, 540));

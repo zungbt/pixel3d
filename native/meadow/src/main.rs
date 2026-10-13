@@ -1,11 +1,13 @@
 // The meadow: ground, paths, pond, trees, rocks and grass, toon-lit with pixel outlines, at the
 // PC's local time of day. Settings (pixel size, fps cap, clock or the web's 300 s day, fog, post
-// clock) live in %APPDATA%\pixel3d\settings.txt, set from the tray menu in wallpaper mode; there,
+// clock, all screens or the primary's) live in %APPDATA%\pixel3d\settings.txt, set from the tray
+// menu in wallpaper mode; there,
 // `place = lat, lon` overrides the place guessed from the time zone (sunrise and sunset).
 // Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
 // --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
 // local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
-// --toggle-clock S (break and mend the post clock every S seconds, not saved).
+// --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
+// WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -28,12 +30,12 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowAttributes, WindowId};
 
-use gpu::{Frame, Gpu};
-use render::{ClockPose, Renderer};
+use gpu::{Gpu, Missed, Surface};
+use render::{ClockPose, Renderer, Screen};
 
-// winit never reports WindowEvent::Occluded on Windows, so while wgpu says the surface is
+// winit never reports WindowEvent::Occluded on Windows, so while wgpu says the surfaces are
 // occluded we just try again this often.
 const OCCLUDED_RETRY: Duration = Duration::from_millis(250);
 const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
@@ -45,13 +47,13 @@ type UserEvent = ();
 
 struct App {
     settings: Settings, // as loaded, with this run's arguments over them
-    gpu: Option<(Gpu, Renderer)>,
+    screens: Option<Vec<Screen>>, // --screens: windows laid out as these monitors (windowed mode)
+    scene: Option<Scene>,
     pacer: FramePacer,
     start: Instant,
-    resized: Option<PhysicalSize<u32>>, // applied once, just before the next frame
-    minimised: bool,
-    paused: bool, // wallpaper mode: a maximised or fullscreen window hides the desktop
-    retry_at: Option<Instant>, // set while the surface is occluded
+    #[cfg(windows)]
+    paused: bool, // wallpaper mode: maximised or fullscreen windows hide every screen's meadow
+    retry_at: Option<Instant>, // set while the surfaces are occluded
     last_frame: Option<Instant>,
     time: f64, // animation clock, s
     sky: sky_clock::SkyClock,
@@ -63,16 +65,40 @@ struct App {
     desktop: Option<wallpaper::Desktop>, // Some in wallpaper mode
 }
 
+// The open windows, one per screen (the first is the primary's), their surfaces on one device and
+// the meadow drawn into them.
+struct Scene {
+    gpu: Gpu,
+    surfaces: Vec<Surface>,
+    renderer: Renderer,
+    resized: Vec<Option<PhysicalSize<u32>>>, // applied once, just before the next frame
+    minimised: Vec<bool>,
+    covered: Vec<bool>, // wallpaper mode: a maximised or fullscreen window hides that screen
+}
+
+impl Scene {
+    fn index(&self, id: WindowId) -> Option<usize> {
+        self.surfaces.iter().position(|s| s.window.id() == id)
+    }
+
+    fn drawn(&self) -> Vec<bool> {
+        self.minimised.iter().zip(&self.covered).map(|(m, c)| !m && !c).collect()
+    }
+}
+
 impl App {
     fn now_ms(&self) -> f64 {
         self.start.elapsed().as_secs_f64() * 1000.0
     }
 
     fn redraw(&mut self) {
-        let Some((gpu, renderer)) = self.gpu.as_mut() else { return };
-        if let Some(size) = self.resized.take() {
-            gpu.configure(size.width, size.height);
-            renderer.resize(&gpu.device, &gpu.queue, size.width, size.height);
+        let Some(scene) = self.scene.as_mut() else { return };
+        // In order: the primary's size scales the others.
+        for (i, resized) in scene.resized.iter_mut().enumerate() {
+            if let Some(size) = resized.take() {
+                scene.gpu.configure(&mut scene.surfaces[i], size.width, size.height);
+                scene.renderer.resize(&scene.gpu.device, &scene.gpu.queue, i, size.width, size.height);
+            }
         }
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).as_secs_f64().min(MAX_DT));
@@ -85,6 +111,25 @@ impl App {
             self.wreck.set(!self.wreck.broken(), unix);
         }
         self.wreck.update(dt, unix);
+        let (mut frames, mut occluded) = (Vec::new(), false);
+        let drawn = scene.drawn();
+        for (i, surface) in scene.surfaces.iter_mut().enumerate().filter(|(i, _)| drawn[*i]) {
+            match scene.gpu.acquire(surface) {
+                Ok(frame) => frames.push((i, frame)),
+                Err(Missed::Occluded) => occluded = true,
+                Err(Missed::Skipped) => {}
+            }
+        }
+        if frames.is_empty() {
+            if occluded {
+                if self.retry_at.is_none() {
+                    log::info!("occluded: pausing");
+                }
+                self.retry_at = Some(now + OCCLUDED_RETRY);
+                self.last_frame = None; // no catch-up jump when visible again
+            }
+            return;
+        }
         let sky = self.sky.state(time);
         let clock = ClockPose {
             hands: self.sky.hands(self.wreck.behind(unix)),
@@ -93,17 +138,11 @@ impl App {
             weathering: self.wreck.weathering(unix),
             glow: self.wreck.glow(),
         };
-        match gpu.frame(|device, queue, view| renderer.render(device, queue, view, time, dt, &sky, &clock)) {
-            Frame::Occluded => {
-                if self.retry_at.is_none() {
-                    log::info!("occluded: pausing");
-                }
-                self.retry_at = Some(now + OCCLUDED_RETRY);
-                self.last_frame = None; // no catch-up jump when visible again
-                return;
-            }
-            Frame::Skipped => return,
-            Frame::Drawn => {}
+        scene.renderer.update(&scene.gpu.queue, time, dt, &sky, &clock);
+        for (i, frame) in frames {
+            let view = frame.0.texture.create_view(&Default::default());
+            scene.renderer.render(&scene.gpu.device, &scene.gpu.queue, i, &view);
+            scene.gpu.present(&scene.surfaces[i], frame);
         }
         self.time += dt;
         self.last_frame = Some(now);
@@ -120,27 +159,47 @@ impl App {
     }
 
     fn open(&mut self, event_loop: &ActiveEventLoop) {
-        #[allow(unused_mut)]
-        let mut attrs = Window::default_attributes().with_title("meadow").with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        let normal = Window::default_attributes().with_title("meadow");
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut windows: Vec<(WindowAttributes, Option<Screen>)> = match &self.screens {
+            Some(screens) => screens.iter().map(|&sc| (normal.clone().with_inner_size(PhysicalSize::new(sc.size.0, sc.size.1)).with_resizable(false), Some(sc))).collect(),
+            None => vec![(normal.with_inner_size(winit::dpi::LogicalSize::new(1280, 720)), None)],
+        };
         #[cfg(windows)]
         if let Some(desktop) = self.desktop.as_mut()
             && !desktop.fallback
         {
-            match desktop.window_attributes() {
-                Some(behind_icons) => attrs = behind_icons,
+            match desktop.window_attributes(self.settings.all_screens) {
+                Some(behind_icons) => windows = behind_icons.into_iter().map(|(attrs, sc)| (attrs, Some(sc))).collect(),
                 None if desktop.fallback => {}
                 None => return, // no desktop yet: the next check tries again
             }
         }
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let gpu = Gpu::new(window);
-        let mut renderer = Renderer::new(&gpu.device, gpu.config.format, gpu.config.width, gpu.config.height, self.settings.pixel_size);
-        renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
-        self.gpu = Some((gpu, renderer));
+        let mut created = windows.into_iter().map(|(attrs, sc)| (Arc::new(event_loop.create_window(attrs).expect("create window")), sc));
+        let (first, first_screen) = created.next().expect("a window");
+        let (gpu, surface) = Gpu::new(first);
+        let format = surface.config.format;
+        let mut surfaces = vec![surface];
+        let mut placed = vec![first_screen];
+        for (window, sc) in created {
+            surfaces.push(gpu.surface(window, format));
+            placed.push(sc);
+        }
+        // Sized as the windows came out (a monitor's own size, in wallpaper mode).
+        let screens: Vec<Screen> =
+            surfaces.iter().zip(placed).map(|(s, sc)| Screen { offset: sc.map_or((0, 0), |sc| sc.offset), size: (s.config.width, s.config.height) }).collect();
+        log::info!("screens: {screens:?}");
+        let mut renderer = Renderer::new(&gpu.device, format, &screens, self.settings.pixel_size);
+        for (i, s) in surfaces.iter().enumerate() {
+            renderer.resize(&gpu.device, &gpu.queue, i, s.config.width, s.config.height);
+        }
+        let n = surfaces.len();
+        self.scene = Some(Scene { gpu, surfaces, renderer, resized: vec![None; n], minimised: vec![false; n], covered: vec![false; n] });
     }
 
-    /// Wallpaper mode, every CHECK_EVERY: (re)open the window behind the icons if it's gone, and
-    /// pause while the desktop is hidden. Returns when to check next (None outside wallpaper mode).
+    /// Wallpaper mode, every CHECK_EVERY: (re)open the windows behind the icons if they're gone or
+    /// the monitors changed, and pause each while its screen is hidden. Returns when to check next
+    /// (None outside wallpaper mode).
     #[cfg(windows)]
     fn check_desktop(&mut self, event_loop: &ActiveEventLoop) -> Option<Instant> {
         let desktop = self.desktop.as_mut()?;
@@ -150,24 +209,38 @@ impl App {
         }
         desktop.next_check = now + wallpaper::CHECK_EVERY;
         let (next, fallback) = (desktop.next_check, desktop.fallback);
-        // An Explorer restart destroys our window with the desktop, but winit sends no Destroyed.
-        if self.gpu.is_some() && !fallback && !desktop.attached() {
-            log::warn!("desktop gone (Explorer restarted?): reopening");
-            self.gpu = None;
-            desktop.lost();
+        if self.scene.is_some() && !fallback {
+            // An Explorer restart destroys our windows with the desktop, but winit sends no Destroyed.
+            if !desktop.attached() {
+                log::warn!("desktop gone (Explorer restarted?): reopening");
+                self.scene = None;
+                desktop.lost();
+            } else if desktop.monitors_changed(self.settings.all_screens) {
+                log::info!("monitors changed: reopening on {:?}", wallpaper::monitors());
+                self.scene = None;
+                desktop.lost();
+            }
         }
-        if self.gpu.is_none() {
+        if self.scene.is_none() {
             self.open(event_loop);
             return Some(next);
         }
-        let covered = !fallback && wallpaper::desktop_covered();
-        if covered != self.paused {
-            log::info!("{}", if covered { "desktop covered: pausing" } else { "desktop visible again" });
-            self.paused = covered;
+        let scene = self.scene.as_mut().unwrap();
+        let covered = if fallback { vec![false; scene.covered.len()] } else { self.desktop.as_ref().unwrap().covered() };
+        for (i, (&now_covered, was)) in covered.iter().zip(&mut scene.covered).enumerate() {
+            if now_covered != *was {
+                log::info!("screen {i} {}", if now_covered { "covered" } else { "visible again" });
+                *was = now_covered;
+            }
+        }
+        let all = covered.iter().all(|&c| c);
+        if all != self.paused {
+            log::info!("{}", if all { "desktop covered: pausing" } else { "desktop visible again" });
+            self.paused = all;
             self.last_frame = None; // no catch-up jump
             self.frames = 0; // and the fps log doesn't average over the pause
             self.window_start = now;
-            if covered {
+            if all {
                 wallpaper::trim_memory();
             }
         }
@@ -186,9 +259,11 @@ impl App {
         self.settings.set(setting);
         match setting {
             Setting::PixelSize(n) => {
-                if let Some((gpu, renderer)) = self.gpu.as_mut() {
-                    renderer.set_pixel_size(n);
-                    self.resized = self.resized.or(Some(PhysicalSize::new(gpu.config.width, gpu.config.height)));
+                if let Some(scene) = self.scene.as_mut() {
+                    scene.renderer.set_pixel_size(n);
+                    for (resized, s) in scene.resized.iter_mut().zip(&scene.surfaces) {
+                        *resized = resized.or(Some(PhysicalSize::new(s.config.width, s.config.height)));
+                    }
                 }
             }
             Setting::Fps(_) => {}
@@ -204,6 +279,15 @@ impl App {
                 }
             }
             Setting::BrokenAt(_) => {}
+            Setting::AllScreens(_) => {
+                // Reopened on the new monitors at once.
+                #[cfg(windows)]
+                if let Some(desktop) = self.desktop.as_mut().filter(|d| !d.fallback) {
+                    self.scene = None;
+                    desktop.lost();
+                    desktop.next_check = Instant::now();
+                }
+            }
         }
         save_setting(setting);
     }
@@ -215,7 +299,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(desktop) = self.desktop.as_mut() {
             desktop.show_tray(&self.settings);
         }
-        if self.gpu.is_none() {
+        if self.scene.is_none() {
             self.open(event_loop);
         }
     }
@@ -232,31 +316,33 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("close requested: exiting");
                 event_loop.exit();
             }
-            // Wallpaper mode: an Explorer restart takes our window down with the desktop; the
-            // next check opens a new one.
+            // Wallpaper mode: an Explorer restart takes our windows down with the desktop; the
+            // next check opens new ones. Windows we closed ourselves are no longer in the scene.
             #[cfg(windows)]
             WindowEvent::Destroyed if self.desktop.is_some() => {
-                if self.gpu.take().is_some() {
+                if self.scene.as_ref().and_then(|scene| scene.index(id)).is_some() {
                     log::warn!("window destroyed with the desktop: reopening");
+                    self.scene = None;
+                    self.desktop.as_mut().unwrap().lost();
                 }
-                self.desktop.as_mut().unwrap().lost();
             }
             WindowEvent::Resized(size) => {
+                let Some((scene, i)) = self.scene.as_mut().and_then(|scene| scene.index(id).map(|i| (scene, i))) else { return };
                 // A 0 size is a minimised window: keep the old surface and targets untouched.
-                self.minimised = size.width == 0 || size.height == 0;
-                if !self.minimised {
-                    self.resized = Some(size);
+                scene.minimised[i] = size.width == 0 || size.height == 0;
+                if !scene.minimised[i] {
+                    scene.resized[i] = Some(size);
                 }
-                log::info!("resized {}x{}{}", size.width, size.height, if self.minimised { " (paused)" } else { "" });
+                log::info!("window {i} resized {}x{}{}", size.width, size.height, if scene.minimised[i] { " (paused)" } else { "" });
             }
             WindowEvent::RedrawRequested => {
-                if self.minimised || self.paused {
+                if !self.scene.as_ref().is_some_and(|scene| scene.drawn().contains(&true)) {
                     return;
                 }
                 // Uncapped, vsync paces the loop and every redraw draws.
@@ -273,25 +359,28 @@ impl ApplicationHandler<UserEvent> for App {
         // Frames come far more often than checks, so waiting for the next frame never delays one.
         let check_at = self.check_desktop(event_loop);
         let idle = check_at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
-        let Some((gpu, _)) = self.gpu.as_ref() else {
+        let Some(scene) = self.scene.as_ref() else {
             event_loop.set_control_flow(idle);
             return;
         };
-        if gpu.failed() {
+        if scene.gpu.failed() {
             log::error!("gpu failed: exiting");
             event_loop.exit();
             return;
         }
-        if self.minimised || self.paused {
-            event_loop.set_control_flow(idle); // the restore Resized event or the next check wakes us
+        // One window asks for every frame; with all minimised or covered, the restore Resized
+        // event or the next check wakes us.
+        let Some(i) = scene.drawn().iter().position(|&d| d) else {
+            event_loop.set_control_flow(idle);
             return;
-        }
+        };
+        let window = &scene.surfaces[i].window;
         let now = Instant::now();
         if let Some(retry) = self.retry_at {
             if now < retry {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(retry));
             } else {
-                gpu.window.request_redraw();
+                window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::WaitUntil(now + OCCLUDED_RETRY));
             }
             return;
@@ -300,16 +389,31 @@ impl ApplicationHandler<UserEvent> for App {
             // Ask again only once a frame is due; RedrawRequested makes the final call.
             Some(due) => {
                 if self.now_ms() >= due - 1.0 {
-                    gpu.window.request_redraw();
+                    window.request_redraw();
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(self.start + Duration::from_secs_f64(due.max(0.0) / 1000.0)));
             }
             None => {
-                gpu.window.request_redraw();
+                window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
     }
+}
+
+/// `WxH+X+Y,...`: the first is the primary; the others' corners are taken relative to its.
+fn parse_screens(v: &str) -> Option<Vec<Screen>> {
+    let rects = v
+        .split(',')
+        .map(|r| {
+            let (size, pos) = r.split_once('+')?;
+            let (w, h) = size.split_once('x')?;
+            let (x, y) = pos.split_once('+')?;
+            Some(((x.parse::<i32>().ok()?, y.parse::<i32>().ok()?), (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let ((x0, y0), _) = rects[0];
+    Some(rects.into_iter().map(|((x, y), size)| Screen { offset: (x - x0, y - y0), size }).collect())
 }
 
 fn unix_now() -> f64 {
@@ -386,6 +490,7 @@ fn main() {
         (false, None) => sky_clock::Mode::Cycle(None),
     };
     settings.clock = mode == sky_clock::Mode::Clock;
+    let screens = arg(&args, "--screens").map(|v| parse_screens(&v).unwrap_or_else(|| panic!("--screens must be like 1280x720+0+0,960x540+170+720, got {v}")));
     let toggle_clock = arg(&args, "--toggle-clock").map(|v| v.parse().ok().filter(|s: &f64| *s > 0.0).unwrap_or_else(|| panic!("--toggle-clock must be seconds, like 8, got {v}")));
     log::info!("settings: {settings:?}");
 
@@ -404,11 +509,11 @@ fn main() {
         wreck: Wreck::new((!settings.show_clock).then(|| settings.broken_at.map_or_else(unix_now, |t| t as f64))),
         toggle_clock: toggle_clock.map(|every| (every, every)),
         settings,
-        gpu: None,
+        screens,
+        scene: None,
         pacer: FramePacer::default(),
         start: now,
-        resized: None,
-        minimised: false,
+        #[cfg(windows)]
         paused: false,
         retry_at: None,
         last_frame: None,

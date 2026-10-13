@@ -5,17 +5,15 @@
 use libm::{ceil, floor, hypot, pow, sqrt};
 
 use crate::rng::Mulberry32;
-use crate::world::{GROUND_CELL, GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
+use crate::world::{Area, GROUND_CELL, GROUND_SIZE, Layout, Rock, SIZE, Tree, fbm, height_at, lerp, path_edge, sand_q, smoothstep};
 
 pub const BLADE_H: f64 = 0.3; // also the wind's height scale for the flowers and the perched insects
 pub const ATTEMPTS: u32 = 240_000; // the web's ~59 per square unit, over the whole ground
-const HALF: f64 = GROUND_SIZE / 2.0 - 0.1; // just inside the ground
 const SEED: u32 = 99;
 const NORMAL_E: f64 = GROUND_CELL / 2.0; // as the ground mesh's vertex normals
 
-// Canopy mask: 4 cells per unit over the placement area (no tree grows outside it).
+// Canopy mask: 4 cells per unit (no tree grows outside its area).
 const MASK_RES: f64 = 4.0;
-const MASK_N: usize = (SIZE * MASK_RES) as usize;
 
 #[derive(Debug, PartialEq)]
 pub struct Blade {
@@ -28,35 +26,46 @@ pub struct Blade {
 }
 
 /// The cells under a tree crown, so each blade does one lookup instead of a loop over all trees.
-pub struct CanopyMask(Vec<bool>);
+pub struct CanopyMask {
+    n: usize,       // cells per side
+    lo: (f64, f64), // the area's low corner
+    cells: Vec<bool>,
+}
 
 impl CanopyMask {
+    /// Over the placement area.
     pub fn new(trees: &[Tree]) -> Self {
-        let mut mask = vec![false; MASK_N * MASK_N];
-        let cell = |v: f64| (v + SIZE / 2.0) * MASK_RES;
+        Self::over(trees, Area { x: 0.0, z: 0.0, size: SIZE })
+    }
+
+    pub fn over(trees: &[Tree], area: Area) -> Self {
+        let n = (area.size * MASK_RES) as usize;
+        let lo = (area.x - area.size / 2.0, area.z - area.size / 2.0);
+        let mut cells = vec![false; n * n];
+        let cell = |v: f64, l: f64| (v - l) * MASK_RES;
         for t in trees {
             let r = t.canopy;
-            let lo = |v: f64| floor(cell(v)).max(0.0) as usize;
-            let hi = |v: f64| (ceil(cell(v)).max(0.0) as usize).min(MASK_N);
-            for gz in lo(t.z - r)..hi(t.z + r) {
-                for gx in lo(t.x - r)..hi(t.x + r) {
-                    let cx = (gx as f64 + 0.5) / MASK_RES - SIZE / 2.0;
-                    let cz = (gz as f64 + 0.5) / MASK_RES - SIZE / 2.0;
+            let from = |v: f64, l: f64| floor(cell(v, l)).max(0.0) as usize;
+            let to = |v: f64, l: f64| (ceil(cell(v, l)).max(0.0) as usize).min(n);
+            for gz in from(t.z - r, lo.1)..to(t.z + r, lo.1) {
+                for gx in from(t.x - r, lo.0)..to(t.x + r, lo.0) {
+                    let cx = (gx as f64 + 0.5) / MASK_RES + lo.0;
+                    let cz = (gz as f64 + 0.5) / MASK_RES + lo.1;
                     if hypot(cx - t.x, cz - t.z) < r {
-                        mask[gz * MASK_N + gx] = true;
+                        cells[gz * n + gx] = true;
                     }
                 }
             }
         }
-        Self(mask)
+        Self { n, lo, cells }
     }
 
-    /// Outside the placement area counts as uncovered.
+    /// Outside the area counts as uncovered.
     pub fn covers(&self, x: f64, z: f64) -> bool {
-        let cell = |v: f64| floor((v + SIZE / 2.0) * MASK_RES);
-        let inside = |g: f64| (0.0..MASK_N as f64).contains(&g);
-        let (gx, gz) = (cell(x), cell(z));
-        inside(gx) && inside(gz) && self.0[gz as usize * MASK_N + gx as usize]
+        let cell = |v: f64, l: f64| floor((v - l) * MASK_RES);
+        let inside = |g: f64| (0.0..self.n as f64).contains(&g);
+        let (gx, gz) = (cell(x, self.lo.0), cell(z, self.lo.1));
+        inside(gx) && inside(gz) && self.cells[gz as usize * self.n + gx as usize]
     }
 }
 
@@ -78,15 +87,22 @@ pub fn grass_density(x: f64, z: f64, mask: &CanopyMask, rocks: &[Rock]) -> f64 {
 
 /// Every blade on the ground for this layout (~160k). Seeded: the same layout gives the same blades.
 pub fn place_grass(layout: &Layout) -> Vec<Blade> {
-    let mut rng = Mulberry32::new(SEED);
-    let mut rand = move || rng.next();
     let mask = CanopyMask::new(&layout.trees);
-    let ground = GroundGrid::new();
+    let ground = Area { x: 0.0, z: 0.0, size: GROUND_SIZE };
+    place_blades(&mut Mulberry32::new(SEED), &mask, &layout.rocks, ground, ATTEMPTS)
+}
+
+/// Blades over one square of ground, darts from the stream `rng`, thinned by `grass_density`.
+/// Roots sit on the square's own ground mesh (`GroundGrid`).
+pub fn place_blades(rng: &mut Mulberry32, mask: &CanopyMask, rocks: &[Rock], area: Area, attempts: u32) -> Vec<Blade> {
+    let mut rand = || rng.next();
+    let half = area.size / 2.0 - 0.1; // just inside the square
+    let ground = GroundGrid::new(area);
     let mut blades = Vec::new();
-    for _ in 0..ATTEMPTS {
-        let x = (rand() * 2.0 - 1.0) * HALF;
-        let z = (rand() * 2.0 - 1.0) * HALF;
-        if rand() > grass_density(x, z, &mask, &layout.rocks) {
+    for _ in 0..attempts {
+        let x = area.x + (rand() * 2.0 - 1.0) * half;
+        let z = area.z + (rand() * 2.0 - 1.0) * half;
+        if rand() > grass_density(x, z, mask, rocks) {
             continue;
         }
         let scale = 0.7 + rand() * 0.6;
@@ -98,32 +114,36 @@ pub fn place_grass(layout: &Layout) -> Vec<Blade> {
     blades
 }
 
-/// Heights and normals at the ground mesh's vertices. Each blade interpolates them over the triangle
-/// the GPU draws under it, so its root sits on the drawn ground, at a fifth of the `height_at` calls.
-struct GroundGrid {
+/// Heights and normals at a square's mesh vertices (every GROUND_CELL, as the ground mesh draws it).
+/// Each blade interpolates them over the triangle the GPU draws under it, so its root sits on the
+/// drawn ground, at a fifth of the `height_at` calls.
+pub(crate) struct GroundGrid {
+    x0: f64, // the low corner
+    z0: f64,
     n: usize, // cells per side
     height: Vec<f64>,
     normal: Vec<[f32; 3]>,
 }
 
 impl GroundGrid {
-    fn new() -> Self {
-        let n = (GROUND_SIZE / GROUND_CELL) as usize;
-        let at = |k: usize| -GROUND_SIZE / 2.0 + k as f64 * GROUND_CELL;
+    pub(crate) fn new(area: Area) -> Self {
+        let n = (area.size / GROUND_CELL) as usize;
+        let (x0, z0) = (area.x - area.size / 2.0, area.z - area.size / 2.0);
+        let at = |o: f64, k: usize| o + k as f64 * GROUND_CELL;
         let (mut height, mut normal) = (Vec::with_capacity((n + 1) * (n + 1)), Vec::with_capacity((n + 1) * (n + 1)));
         for j in 0..=n {
             for i in 0..=n {
-                height.push(height_at(at(i), at(j)));
-                normal.push(ground_normal(at(i), at(j)));
+                height.push(height_at(at(x0, i), at(z0, j)));
+                normal.push(ground_normal(at(x0, i), at(z0, j)));
             }
         }
-        Self { n, height, normal }
+        Self { x0, z0, n, height, normal }
     }
 
-    /// Height and normal at (x, z) inside the ground, as the mesh's triangles interpolate them: each
+    /// Height and normal at (x, z) inside the square, as the mesh's triangles interpolate them: each
     /// cell is split along its (i + 1, j)–(i, j + 1) diagonal.
-    fn at(&self, x: f64, z: f64) -> (f32, [f32; 3]) {
-        let (gx, gz) = ((x + GROUND_SIZE / 2.0) / GROUND_CELL, (z + GROUND_SIZE / 2.0) / GROUND_CELL);
+    pub(crate) fn at(&self, x: f64, z: f64) -> (f32, [f32; 3]) {
+        let (gx, gz) = ((x - self.x0) / GROUND_CELL, (z - self.z0) / GROUND_CELL);
         let (i, j) = (floor(gx) as usize, floor(gz) as usize);
         let (u, v) = (gx - i as f64, gz - j as f64);
         let k = |di: usize, dj: usize| (j + dj) * (self.n + 1) + i + di;
@@ -219,7 +239,8 @@ mod tests {
         let mut off = 0.0f64; // farthest root from the terrain: the mesh's flat triangles cut its curves
         for b in blades {
             let (x, z) = (b.x as f64, b.z as f64);
-            assert!(x.abs() <= HALF && z.abs() <= HALF);
+            let half = GROUND_SIZE / 2.0 - 0.1;
+            assert!(x.abs() <= half && z.abs() <= half);
             off = off.max((b.y as f64 - height_at(x, z)).abs());
             assert!((0.7..=1.3).contains(&b.scale));
             let [nx, ny, nz] = b.normal;
@@ -236,8 +257,9 @@ mod tests {
         let trees = &meadow().0.trees;
         let mask = CanopyMask::new(trees);
         assert!(trees.iter().all(|t| mask.covers(t.x, t.z)));
-        for gz in 0..MASK_N {
-            for gx in 0..MASK_N {
+        let n = (SIZE * MASK_RES) as usize;
+        for gz in 0..n {
+            for gx in 0..n {
                 let cx = (gx as f64 + 0.5) / MASK_RES - SIZE / 2.0;
                 let cz = (gz as f64 + 0.5) / MASK_RES - SIZE / 2.0;
                 let under = trees.iter().any(|t| hypot(cx - t.x, cz - t.z) < t.canopy);
