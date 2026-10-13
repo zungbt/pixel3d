@@ -176,7 +176,7 @@ fn fs_ground(in: VertexOut) -> SceneOut {
         let p = in.world.xz;
         // Gravel: a pebble here and there, lighter or darker than the dirt.
         let cell = floor(p / 0.09);
-        let pebble = select(1.0, select(0.7, 1.25, noise_hash(cell + vec2f(7.0, 3.0)) < 0.5), noise_hash(cell) > 0.94);
+        let pebble = select(1.0, select(0.7, 1.25, noise_hash(cell + vec2f(7.0, 3.0)) < 0.5), noise_hash(cell) > 0.985);
         base = PATH_COLOR * pebble * (1.0 - 0.4 * g.rain.y);
         // Puddles in the dips, spreading as the path soaks and shrinking as it dries, ringed by
         // the drops while it rains; a muddy rim around them.

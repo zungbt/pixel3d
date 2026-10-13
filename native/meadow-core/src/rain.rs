@@ -16,7 +16,7 @@ const SECOND: f64 = 0.22; // s: the flash's flicker after the first
 
 pub struct Rain {
     pub falling: f64, // 0 dry to 1 a downpour
-    pub wet: f64,     // 0 dry to 1 soaked
+    pub wet: f64,     // 0 dry to 1 soaked, at most as the rain is hard
     since: f64,       // s since the last flash
     next: f64,        // s until the next, in a storm
     rng: Mulberry32,
@@ -33,7 +33,8 @@ impl Rain {
     pub fn update(&mut self, dt: f64, weather: Option<&Weather>) {
         let target = weather.map_or(0.0, Weather::rain);
         self.falling += (target - self.falling) * (1.0 - exp(-dt / EASE));
-        self.wet = if self.falling > 0.05 { (self.wet + dt * self.falling / SOAK).min(1.0) } else { (self.wet - dt / DRY).max(0.0) };
+        // As wet as the rain is hard: a drizzle only dampens, a downpour soaks (and floods the dips).
+        self.wet = if self.wet < self.falling { (self.wet + dt * self.falling / SOAK).min(self.falling) } else { (self.wet - dt / DRY).max(self.falling) };
         self.since += dt;
         if weather.is_some_and(Weather::storm) {
             self.next -= dt;
@@ -94,12 +95,16 @@ mod tests {
         assert!(rain.falling > 0.99, "{}", rain.falling);
         assert!((0.15..0.25).contains(&rain.wet), "a couple of minutes: damp, {}", rain.wet);
         run(&mut rain, 900.0, Some(&downpour));
-        assert_eq!(rain.wet, 1.0);
+        assert!(rain.wet > 0.999, "{}", rain.wet);
         // Stops: the falling eases off at once, the wet lingers.
         run(&mut rain, 120.0, Some(&CLEAR));
         assert!(rain.falling < 0.001 && rain.wet > 0.95, "{} {}", rain.falling, rain.wet);
         run(&mut rain, 3600.0, None);
-        assert_eq!(rain.wet, 0.0);
+        assert!(rain.wet < 1e-6, "{}", rain.wet);
+        // A drizzle, however long, only dampens.
+        let drizzle = Weather { code: 51, ..CLEAR };
+        run(&mut rain, 3600.0, Some(&drizzle));
+        assert!((rain.wet - drizzle.rain()).abs() < 0.01, "{}", rain.wet);
     }
 
     #[test]
