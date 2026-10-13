@@ -106,7 +106,7 @@ impl LiveWeather {
         }
         match reply {
             Ok(w) => {
-                log::info!("weather: cloud {:.0}%, wind from {:.0}° at {:.1} km/h", w.cover * 100.0, w.wind_from, w.wind_kmh);
+                log::info!("weather: cloud {:.0}%, wind from {:.0}° at {:.1} km/h, gusts {:.1}", w.cover * 100.0, w.wind_from, w.wind_kmh, w.gust_kmh);
                 self.latest = Some((w, now));
                 self.next = Some(now + EVERY);
             }

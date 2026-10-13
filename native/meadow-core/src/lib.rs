@@ -17,5 +17,6 @@ pub mod sky;
 pub mod sun;
 pub mod tiles;
 pub mod weather;
+pub mod wind;
 pub mod world;
 pub mod wreck;

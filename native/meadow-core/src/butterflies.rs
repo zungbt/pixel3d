@@ -9,6 +9,7 @@ use crate::flight::{self, Obstacle, V3};
 use crate::flowers::{HEAD_R, HEAD_Y, Head};
 use crate::motion::{Heading, pick, rng_for, turn};
 use crate::rng::Mulberry32;
+use crate::wind::Wind;
 use crate::world::{Layout, height_at, pond_edge};
 
 pub const COUNT: usize = 12;
@@ -119,20 +120,20 @@ impl Butterflies {
         &self.poses
     }
 
-    /// One step at animation time `t` (s, the wind's clock) after `dt`, in this frame's daylight.
-    pub fn update(&mut self, t: f64, dt: f64, daylight: f64) {
+    /// One step at animation time `t` (s) after `dt`, in this frame's daylight and wind.
+    pub fn update(&mut self, t: f64, dt: f64, daylight: f64, wind: &Wind) {
         for i in 0..self.flies.len() {
-            self.update_one(i, t, dt, daylight);
+            self.update_one(i, t, dt, daylight, wind);
         }
     }
 
-    fn update_one(&mut self, i: usize, t: f64, dt: f64, daylight: f64) {
+    fn update_one(&mut self, i: usize, t: f64, dt: f64, daylight: f64, wind: &Wind) {
         let dark = daylight < self.flies[i].threshold;
         if self.flies[i].state.is_none() {
             // First frame: start wherever this time of day would have left it.
             let head = Perch::Head(self.random_head(i));
             self.flies[i].perch = Some(head);
-            self.flies[i].pos = self.perch_point(head, t);
+            self.flies[i].pos = self.perch_point(head, wind);
             if dark {
                 self.flies[i].state = Some(State::Roost);
             } else {
@@ -155,7 +156,7 @@ impl Butterflies {
         let state = self.flies[i].state.unwrap();
         let flying = matches!(state, State::Fly | State::ToBask | State::ToRoost);
         if flying {
-            if self.fly(i, t, dt) {
+            if self.fly(i, dt, wind) {
                 // A wander ends in the air; from there it looks for a flower close by.
                 if matches!(self.flies[i].perch, Some(Perch::Air(_))) {
                     let near = self.head_near(i, NEAR);
@@ -168,7 +169,7 @@ impl Butterflies {
                 self.fly_to(i, if state == State::ToRoost { State::ToRoost } else { State::Fly }, far);
             }
         } else {
-            self.flies[i].pos = self.perch_point(self.flies[i].perch.unwrap(), t);
+            self.flies[i].pos = self.perch_point(self.flies[i].perch.unwrap(), wind);
             if state != State::Roost {
                 self.flies[i].timer -= dt;
                 if self.flies[i].timer <= 0.0 {
@@ -207,13 +208,13 @@ impl Butterflies {
     }
 
     /// Where a perch is: on top of the swaying flower head or the rock, or the wander's point.
-    fn perch_point(&self, perch: Perch, t: f64) -> V3 {
+    fn perch_point(&self, perch: Perch, wind: &Wind) -> V3 {
         match perch {
             Perch::Air(p) => p,
             Perch::Rock(r) => self.rock_at[r].1,
             Perch::Head(h) => {
                 let h = self.heads[h];
-                let (sx, sz) = flight::wind_sway(t, h.x, h.z, HEAD_Y);
+                let (sx, sz) = wind.sway(h.x, h.z, HEAD_Y);
                 V3::new(h.x + sx, h.y + HEAD_R, h.z + sz)
             }
         }
@@ -352,9 +353,9 @@ impl Butterflies {
     }
 
     /// One step of flight toward the perch; true on arrival.
-    fn fly(&mut self, i: usize, t: f64, dt: f64) -> bool {
+    fn fly(&mut self, i: usize, dt: f64, wind: &Wind) -> bool {
         let perch = self.flies[i].perch.unwrap();
-        let target = self.perch_point(perch, t);
+        let target = self.perch_point(perch, wind);
         let ignore = match perch {
             Perch::Rock(r) => Some(r),
             _ => None,
@@ -416,7 +417,7 @@ mod tests {
         while i as f64 / fps < seconds {
             let t = i as f64 / fps;
             let dt = if i == 0 { 0.0 } else { 1.0 / fps };
-            b.update(t, dt, sky_state(t, 0.0).daylight);
+            b.update(t, dt, sky_state(t, 0.0).daylight, &Wind::at(t));
             on_frame(b, dt);
             i += 1;
         }
@@ -465,12 +466,12 @@ mod tests {
         let night = DAY_LENGTH * 0.75;
         assert!(sky_state(night, 0.0).daylight < 0.1);
         let mut b = butterflies();
-        b.update(night, 0.0, sky_state(night, 0.0).daylight);
+        b.update(night, 0.0, sky_state(night, 0.0).daylight, &Wind::at(night));
         for (f, p) in b.flies.iter().zip(b.poses()) {
             assert_eq!(f.state, Some(State::Roost));
             assert_eq!(p.wing, FOLDED);
             let Some(Perch::Head(h)) = f.perch else { panic!("roosting off a flower") };
-            assert!(p.pos.distance(b.perch_point(Perch::Head(h), night)) < 1e-12);
+            assert!(p.pos.distance(b.perch_point(Perch::Head(h), &Wind::at(night))) < 1e-12);
         }
     }
 }

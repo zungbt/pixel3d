@@ -9,6 +9,7 @@ use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::clouds::{self, Clouds};
+use meadow_core::wind::Wind;
 use meadow_core::weather::Weather;
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
@@ -85,6 +86,7 @@ struct Globals {
     params: [f32; 4],
     fog: [f32; 4],    // rgb: ground fog colour, a: amount
     clouds: [f32; 4], // xy: the big clouds' drift, zw: the wisps'
+    wind: [f32; 4],   // xy: where the grass leans, z: the gusts' phase (s), w: their strength
 }
 
 #[repr(C)]
@@ -365,6 +367,7 @@ pub struct Renderer {
     post_clock: PostClock,
     frog: Frog,
     clouds: Clouds,
+    wind: Wind,
     frog_draw: Draw,
     pixel_size: u32,
 }
@@ -816,6 +819,7 @@ impl Renderer {
             post_clock: PostClock::new(device, &world_layout),
             frog: Frog::new(),
             clouds: Clouds::default(),
+            wind: Wind::default(),
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
         }
@@ -875,7 +879,7 @@ impl Renderer {
 
     /// Every insect one step on (in the web's species order) and at its pose for this frame.
     fn pose_insects(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, sky: &SkyState) {
-        self.butterflies.update(time, dt, sky.daylight);
+        self.butterflies.update(time, dt, sky.daylight, &self.wind);
         self.dragonflies.update(dt, sky.daylight, self.gnats.swarms());
         self.fireflies.update(time, dt, sky.phase);
         self.gnats.update(time, dt, sky.elevation, self.dragonflies.darting());
@@ -935,11 +939,15 @@ impl Renderer {
     /// rendering the views.
     pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose, weather: Option<&Weather>) {
         self.set_sky(sky);
+        self.wind.update(dt, weather);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
         self.globals.params[0] = time as f32;
         self.globals.params[1] = dial_glow(sky) * clock.glow as f32;
-        self.clouds.update(time, dt, weather);
+        let [lx, lz] = self.wind.lean();
+        self.globals.wind = [lx, lz, self.wind.phase, self.wind.strength].map(|v| v as f32);
+        self.globals.params[3] = self.wind.flutter as f32;
+        self.clouds.update(time, dt, weather, &self.wind);
         self.globals.params[2] = clouds::cover(unix, sky.elevation, weather) as f32;
         let (big, wisps) = (self.clouds.big, self.clouds.wisps);
         self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
@@ -1092,6 +1100,6 @@ mod tests {
             })
             .expect("Globals in common.wgsl");
         assert_eq!(span as usize, size_of::<Globals>());
-        assert_eq!(size_of::<Globals>(), 320, "three mat4 and eight vec4");
+        assert_eq!(size_of::<Globals>(), 336, "three mat4 and nine vec4");
     }
 }

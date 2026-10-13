@@ -12,12 +12,15 @@ struct VertexOut {
     @location(4) color: vec3f,
 }
 
-// The grass's travelling gust at time t for something rooted at base: the tip's offset at
-// BLADE_H (meadow_core::flight::wind_sway, which the perched insects follow).
-fn gust(t: f32, base: vec2f) -> vec3f {
-    var sway = sin(t * 1.6 - (base.x + base.y) * 0.45) * 0.5 + 0.5;
-    sway = sway * 0.12 + sin(t * 3.1 + base.x * 2.0) * 0.02;
-    return vec3f(0.7071, 0.0, -0.7071) * sway;
+// The grass's travelling gust for something rooted at base: the tip's offset at BLADE_H
+// (meadow_core::wind::Wind::sway, which the perched insects follow).
+fn gust(base: vec2f) -> vec3f {
+    let lean = g.wind.xy;
+    let t = g.wind.z;
+    let across = dot(base, vec2f(-lean.y, lean.x)) * 0.45 * 1.4142135;
+    var sway = sin(t * 1.6 - across) * 0.5 + 0.5;
+    sway = sway * 0.12 * g.wind.w + sin(t * 3.1 + base.x * 2.0) * 0.02 * g.params.w;
+    return vec3f(lean.x, 0.0, lean.y) * sway;
 }
 
 // Instance base.w for meshes in the grass's wind (the flowers): unrotated, unit scale, keyed on
@@ -29,7 +32,7 @@ fn vs_scene(v: VertexIn) -> VertexOut {
     let m = model_matrix(v);
     var world = m * vec4f(v.pos, 1.0);
     if v.base.w == IN_WIND {
-        world += vec4f(gust(g.params.x, m[3].xz) * (v.pos.y / BLADE_H), 0.0);
+        world += vec4f(gust(m[3].xz) * (v.pos.y / BLADE_H), 0.0);
     }
     var out: VertexOut;
     out.clip = g.view_proj * world;
@@ -222,7 +225,7 @@ fn vs_grass(v: GrassIn) -> GrassOut {
     }
     // Travelling gust keyed on the base, tip only, in local space before the scale (as the web).
     let tip = local.y / BLADE_H;
-    local += gust(g.params.x, v.pos.xz) * tip;
+    local += gust(v.pos.xz) * tip;
     let world = v.pos + local * (0.7 + 0.6 * v.color_scale.a);
     var out: GrassOut;
     out.clip = g.view_proj * vec4f(world, 1.0);

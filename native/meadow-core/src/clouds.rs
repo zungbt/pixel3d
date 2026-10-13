@@ -5,9 +5,8 @@ use std::f64::consts::TAU;
 
 use libm::{cos, floor, sin};
 
-use crate::flight::wind_sway;
-use crate::grass::BLADE_H;
 use crate::weather::Weather;
+use crate::wind::Wind;
 use crate::world::{lerp, smoothstep};
 
 const BIG_SPEED: f64 = 0.33; // world units/s, as the web's drift
@@ -30,24 +29,18 @@ pub struct Clouds {
 impl Clouds {
     /// Drifts both layers `dt` on at animation time `t` (s): the wind veers slowly, and the grass's
     /// gusts push the clouds along a little faster. Real `weather` sets the heading and speed.
-    pub fn update(&mut self, t: f64, dt: f64, weather: Option<&Weather>) {
-        let (base, veer, wind) = match weather {
+    pub fn update(&mut self, t: f64, dt: f64, weather: Option<&Weather>, wind: &Wind) {
+        let (base, veer, speed) = match weather {
             Some(w) => (w.heading(), REAL_VEER, (w.wind_kmh / WIND_KMH).clamp(0.3, 2.5)),
             None => (HEADING, VEER, 1.0),
         };
         let heading = base + veer * sin(t * TAU / VEER_PERIOD);
-        let pull = wind * (1.0 + GUST_PULL * gust(t));
-        for (layer, speed, turn) in [(&mut self.big, BIG_SPEED, 0.0), (&mut self.wisps, WISP_SPEED, SHEAR)] {
-            layer[0] += cos(heading + turn) * speed * pull * dt;
-            layer[1] += sin(heading + turn) * speed * pull * dt;
+        let pull = speed * (1.0 + GUST_PULL * wind.gust());
+        for (layer, layer_speed, turn) in [(&mut self.big, BIG_SPEED, 0.0), (&mut self.wisps, WISP_SPEED, SHEAR)] {
+            layer[0] += cos(heading + turn) * layer_speed * pull * dt;
+            layer[1] += sin(heading + turn) * layer_speed * pull * dt;
         }
     }
-}
-
-// The grass's gust at the meadow's centre, 0 (still) to 1 (blades bent their furthest).
-fn gust(t: f64) -> f64 {
-    let (x, _) = wind_sway(t, 0.0, 0.0, BLADE_H);
-    (x / 0.7071 / 0.12).clamp(0.0, 1.0)
 }
 
 /// Share of the sky in cloud, 0-1, at unix time `unix` (s) with the sun at `elevation`: clear and
@@ -113,7 +106,7 @@ mod tests {
         let mut t = 0.0;
         for _ in 0..15 * 60 {
             let before = clouds;
-            clouds.update(t, dt, None);
+            clouds.update(t, dt, None, &Wind::at(t));
             t += dt;
             let step = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) / dt;
             let (big, wisps) = (step(clouds.big, before.big), step(clouds.wisps, before.wisps));
@@ -129,12 +122,12 @@ mod tests {
 
     #[test]
     fn real_weather_sets_the_cover_and_the_drift() {
-        let w = Weather { cover: 0.8, wind_from: 270.0, wind_kmh: 24.0 }; // a west wind
+        let w = Weather { cover: 0.8, wind_from: 270.0, wind_kmh: 24.0, gust_kmh: 30.0 }; // a west wind
         assert_eq!(cover(1.8e9, NOON, Some(&w)), 0.8);
         assert_eq!(cover(1.8e9, -0.2, Some(&w)), 0.0, "none at night");
         let mut clouds = Clouds::default();
         for k in 0..60 * 15 {
-            clouds.update(k as f64 / 15.0, 1.0 / 15.0, Some(&w));
+            clouds.update(k as f64 / 15.0, 1.0 / 15.0, Some(&w), &Wind::at(k as f64 / 15.0));
         }
         // Eastward (+x), at twice the made-up speed and within the small swing.
         let [x, z] = clouds.big;
