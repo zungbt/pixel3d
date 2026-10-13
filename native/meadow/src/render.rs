@@ -55,13 +55,14 @@ const PUPIL: u32 = 0x1c1c1c;
 const THROAT: u32 = 0xe6dca0;
 const TONGUE: u32 = 0xd8667a;
 const FROG_PARTS: usize = 12;
-const SHADER_COLORS: [(&str, u32); 7] = [
+const SHADER_COLORS: [(&str, u32); 8] = [
     ("PATH_COLOR", 0xc3a284),
     ("WATER_DEEP", 0x3a8fc9),
     ("WATER_MID", 0x4fb0dc),
     ("WATER_SHALLOW", 0x6fcbe6),
     ("WATER_BANK", 0x2c5a7a),
     ("WATER_FOAM", 0xeef6ff),
+    ("PUDDLE", 0x6f8496),
     ("DIAL_GLOW", 0xffd890),
 ];
 
