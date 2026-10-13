@@ -52,11 +52,11 @@ pub fn overcast(sky: &SkyState, cover: f64) -> SkyState {
     let o = smoothstep(cover, OVERCAST.0, OVERCAST.1);
     let grey = |c: Rgb, k: f64| {
         let l = (c[0] + c[1] + c[2]) / 3.0;
-        c.map(|v| lerp(v, l, 0.5 * o) * k)
+        c.map(|v| lerp(v, l, 0.25 * o) * k)
     };
     SkyState {
         sun_color: sky.sun_color.map(|v| v * (1.0 - 0.85 * o)),
-        hemi_sky: grey(sky.hemi_sky, 1.0 + 0.5 * o),
+        hemi_sky: grey(sky.hemi_sky, 1.0 + 0.2 * o),
         fog_color: grey(sky.fog_color, 1.0),
         ..*sky
     }
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(format!("{:?}", overcast(&sky, 0.6)), format!("{sky:?}"), "broken cloud: as before");
         let grey = overcast(&sky, 1.0);
         assert!((grey.sun_color[0] - sky.sun_color[0] * 0.15).abs() < 1e-12);
-        assert!(grey.hemi_sky.iter().sum::<f64>() > sky.hemi_sky.iter().sum::<f64>() * 1.4);
+        assert!(grey.hemi_sky.iter().sum::<f64>() > sky.hemi_sky.iter().sum::<f64>() * 1.15);
         assert!(grey.hemi_sky[2] - grey.hemi_sky[0] < sky.hemi_sky[2] - sky.hemi_sky[0], "greyer");
     }
 
