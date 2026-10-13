@@ -11,7 +11,7 @@ struct Globals {
     water_tint: vec4f,  // white with a hint of the sky
     params: vec4f,      // x: time (s), y: post clock face glow, z: cloud cover (0-1), w: the wind's flutter
     fog: vec4f,         // rgb: ground fog colour, a: amount (0: none)
-    clouds: vec4f,      // xy: the big clouds' drift, zw: the wisps' (world units)
+    clouds: vec4f,      // xy: the clouds' drift (world units), zw: unused
     wind: vec4f,        // xy: where the grass leans, z: the gusts' phase (s), w: their strength
     rain: vec4f,        // x: how hard it's raining, y: how wet the meadow is (0-1)
 }
@@ -112,47 +112,59 @@ fn gradient_noise(p: vec3f) -> f32 {
     return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
 }
 
-// Octaves of gradient noise, normalised: lumpy cloud edges. Its spread (sd) is about 0.13.
-fn cloud_fbm(p: vec3f, octaves: i32) -> f32 {
-    var sum = 0.0;
-    var weight = 0.0;
-    var amp = 0.5;
-    var q = p;
-    for (var k = 0; k < octaves; k++) {
-        sum += amp * gradient_noise(q);
-        weight += amp;
-        q = q * 2.03 + 17.0;
-        amp *= 0.5;
-    }
-    return sum / weight;
-}
-
-// Cloud shadows (grown from the web's sky.js): puffy clouds that drift with the upper wind (the
-// CPU's Clouds), slowly change shape and come and go with the weather (cover), and faster thin
-// wisps above. A low sun throws the tall clouds' shadows longer, away from it. They only dim
-// direct light.
+// Cloud shadows: separate cumulus some 600 m up (a world unit is about 2.5 m) that drift with the
+// upper wind (the CPU's Clouds), each a few overlapping puffs (a lobed outline), 25-80 m across
+// and many small, forming and melting away over 10-30 minutes; with more cover they swell and
+// merge. Their soft edges (the sun's disc from that high) in pixel-art steps over some 4 m. They
+// only dim direct light.
 fn cloud_shade(world: vec3f) -> f32 {
     let cover = g.params.z;
     if cover <= 0.0 {
         return 1.0;
     }
-    let morph = g.params.x / 300.0; // a cloud's shape turns over in a few minutes
+    let t = g.params.x;
     let flat = g.sun_dir.xz;
-    let reach = 1.5 * min(length(flat) / max(g.sun_dir.y, 0.05), 3.0); // world units
-    let away = -flat / max(length(flat), 1e-4) * reach;
-    let p = world.xz - g.clouds.xy;
-    // The cloud's base and its top, one reach further on: together a longer shadow.
-    let big = max(cloud_fbm(vec3f(p * 0.08, morph), 3), cloud_fbm(vec3f((p - away) * 0.08, morph), 3));
-    // The wisps streak along their wind (clouds.rs: HEADING + SHEAR, about 0.83 rad from +x).
-    let w = world.xz - g.clouds.zw;
-    let along = vec2f(0.67, 0.74);
-    let streak = vec2f(dot(w, along) * 0.1, dot(w, vec2f(-along.y, along.x)) * 0.4);
-    let wisps = cloud_fbm(vec3f(streak, morph * 1.7 + 50.0), 2);
-    // Thresholds from the noise's spread: cover 0 is a clear sky, 1 about half of it in cloud.
-    let edge = 0.3 - 0.3 * cover;
-    let thick = smoothstep(edge, edge + 0.008, big);
-    let thin = 0.5 * smoothstep(edge + 0.04, edge + 0.048, wisps);
-    return mix(1.0, mix(0.55, 0.35, cover), max(thick, thin));
+    let reach = 240.0 * min(length(flat) / max(g.sun_dir.y, 0.05), 3.0); // world units
+    let p = world.xz - g.clouds.xy + flat / max(length(flat), 1e-4) * reach;
+    let m = t / 1200.0;
+    var s = max(cloud_cells(p, t, 28.0, 0.6, 1.0, 0), cloud_cells(p, t, 12.0, 0.35, 0.3, 1));
+    s += 2.4 * gradient_noise(vec3f(p * 0.175, m)) + 1.0 * gradient_noise(vec3f(p.x * 0.45 + 3.0, p.y * 0.45, m));
+    // Swollen with the cover so about that share of the ground is shaded (fitted to the field's spread).
+    let c = max(cover, 0.01);
+    s += 2.0 * (1.252 + 1.588 * c + 1.269 * log(c) + 1.623 * c * c * c * c);
+    let dim = mix(0.55, 0.35, cover);
+    return 1.0 - (1.0 - dim) * (0.35 * step(0.0, s) + 0.35 * step(0.8, s) + 0.3 * step(1.6, s));
+}
+
+// How far inside the nearest cloud of a layer `p` is (world units, negative outside): one cloud
+// to a `size` cell (in a `share` of them), up to `reach` of the cell across.
+fn cloud_cells(p: vec2f, t: f32, size: f32, reach: f32, share: f32, layer: i32) -> f32 {
+    let base = vec2i(floor(p / size));
+    var s = -1e3;
+    for (var dx = -1; dx <= 1; dx++) {
+        for (var dz = -1; dz <= 1; dz++) {
+            let c = base + vec2i(dx, dz);
+            let h = pcg3(vec3i(c, layer));
+            let a = vec3f(h & vec3u(0xffffu)) / 65535.0;
+            let b = vec3f(h >> vec3u(16u)) / 65535.0;
+            if b.z >= share {
+                continue;
+            }
+            let life = 600.0 + 1200.0 * a.z; // s: it forms, lingers and melts
+            let grow = sqrt(sin(3.14159265 * fract(t / life + b.y * 7.0)));
+            let r = size * reach * (0.3 + 0.7 * b.x * b.x) * grow;
+            let centre = (vec2f(c) + 0.15 + 0.7 * a.xy) * size;
+            let q = pcg3(vec3i(c, layer + 8));
+            let lo = vec3f(q & vec3u(0xffffu)) / 65535.0;
+            let hi = vec3f(q >> vec3u(16u)) / 65535.0;
+            for (var j = 0; j < 3; j++) {
+                let u = select(select(vec2f(hi.y, hi.z), vec2f(lo.z, hi.x), j == 1), lo.xy, j == 0);
+                let k = fract((u.x + u.y) * 7.31);
+                s = max(s, r * (0.55 + 0.35 * k) - length(p - centre - (u - 0.5) * r * 1.1));
+            }
+        }
+    }
+    return s;
 }
 
 // Low fog by absolute height, thinning upward: hollows and the pond fill first, the crowns get a

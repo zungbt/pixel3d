@@ -55,13 +55,14 @@ const PUPIL: u32 = 0x1c1c1c;
 const THROAT: u32 = 0xe6dca0;
 const TONGUE: u32 = 0xd8667a;
 const FROG_PARTS: usize = 12;
-const SHADER_COLORS: [(&str, u32); 7] = [
+const SHADER_COLORS: [(&str, u32); 8] = [
     ("PATH_COLOR", 0xc3a284),
     ("WATER_DEEP", 0x3a8fc9),
     ("WATER_MID", 0x4fb0dc),
     ("WATER_SHALLOW", 0x6fcbe6),
     ("WATER_BANK", 0x2c5a7a),
     ("WATER_FOAM", 0xeef6ff),
+    ("PUDDLE", 0x6f8496),
     ("DIAL_GLOW", 0xffd890),
 ];
 
@@ -86,7 +87,7 @@ struct Globals {
     water_tint: [f32; 4],
     params: [f32; 4],
     fog: [f32; 4],    // rgb: ground fog colour, a: amount
-    clouds: [f32; 4], // xy: the big clouds' drift, zw: the wisps'
+    clouds: [f32; 4], // xy: the clouds' drift, zw: unused
     wind: [f32; 4],   // xy: where the grass leans, z: the gusts' phase (s), w: their strength
     rain: [f32; 4],   // x: how hard it's raining, y: how wet the meadow is
 }
@@ -948,7 +949,8 @@ impl Renderer {
         self.wind.update(dt, weather);
         self.rain.update(dt, weather);
         let lit = sky.daylight;
-        let sky = &self.rain.sky(sky);
+        let cover = clouds::cover(unix, sky.elevation, weather);
+        let sky = &self.rain.sky(&clouds::overcast(sky, cover));
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
@@ -964,9 +966,9 @@ impl Renderer {
         self.globals.wind = [lx, lz, self.wind.phase, self.wind.strength].map(|v| v as f32);
         self.globals.params[3] = self.wind.flutter as f32;
         self.clouds.update(time, dt, weather, &self.wind);
-        self.globals.params[2] = clouds::cover(unix, sky.elevation, weather) as f32;
-        let (big, wisps) = (self.clouds.big, self.clouds.wisps);
-        self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
+        self.globals.params[2] = cover as f32;
+        let [x, z] = self.clouds.drift;
+        self.globals.clouds = [x as f32, z as f32, 0.0, 0.0];
     }
 
     /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),

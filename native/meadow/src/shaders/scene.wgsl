@@ -156,12 +156,37 @@ fn on_path(x: f32, z: f32) -> bool {
     return b_dist < b_half_w;
 }
 
+// Rain on still water: rings spreading from where the drops land, in as many cells as it's
+// raining hard.
+fn ripple(p: vec2f) -> bool {
+    let cell = floor(p * 2.5);
+    let cycle = g.params.x * 0.9 + noise_hash(cell) * 8.0;
+    let k = floor(cycle) % 37.0; // a new spot each drop
+    let drop = (cell + 0.25 + 0.5 * vec2f(noise_hash(cell + vec2f(k, 1.0)), noise_hash(cell + vec2f(2.0, k)))) / 2.5;
+    let age = fract(cycle);
+    let ring = abs(length(p - drop) - age * 0.18) < 0.025 && age < 0.8;
+    return ring && noise_hash(cell + vec2f(k, 5.0)) < g.rain.x;
+}
+
 @fragment
 fn fs_ground(in: VertexOut) -> SceneOut {
     let n = normalize(in.normal);
     var base = in.color * (1.0 - 0.25 * g.rain.y); // darker wet
     if on_path(in.world.x, in.world.z) {
-        base = PATH_COLOR * (1.0 - 0.4 * g.rain.y);
+        let p = in.world.xz;
+        // Gravel: a pebble here and there, lighter or darker than the dirt.
+        let cell = floor(p / 0.09);
+        let pebble = select(1.0, select(0.7, 1.25, noise_hash(cell + vec2f(7.0, 3.0)) < 0.5), noise_hash(cell) > 0.985);
+        base = PATH_COLOR * pebble * (1.0 - 0.4 * g.rain.y);
+        // Puddles in the dips, spreading as the path soaks and shrinking as it dries, ringed by
+        // the drops while it rains; a muddy rim around them.
+        let dip = value_noise(p * 2.0);
+        let level = mix(1.05, 0.85, smoothstep(0.3, 1.0, g.rain.y));
+        if dip > level {
+            base = select(g.water_tint.rgb * PUDDLE, WATER_FOAM, ripple(p));
+        } else if dip > level - 0.03 {
+            base = PATH_COLOR * 0.45;
+        }
     }
     let lit = shadow(in.world, n);
     let color = lighting(base * in.extra, n, toon_soft(dot(n, g.sun_dir.xyz)), lit, in.world);
@@ -187,14 +212,7 @@ fn fs_water(in: VertexOut) -> SceneOut {
     let sp = vec2f((p.x - p.y) * 0.7071 + t * 0.08, (p.x + p.y) * 0.7071);
     let h = noise_hash(floor(sp * vec2f(4.0, 12.0)));
     let is_glint = edge < 0.85 && h > 0.97 && sin(t * 2.0 + h * 60.0) > 0.5;
-    // Rain: rings spreading from where the drops land, in as many cells as it's raining hard.
-    let cell = floor(p * 2.5);
-    let cycle = t * 0.9 + noise_hash(cell) * 8.0;
-    let k = floor(cycle) % 37.0; // a new spot each drop
-    let drop = (cell + 0.25 + 0.5 * vec2f(noise_hash(cell + vec2f(k, 1.0)), noise_hash(cell + vec2f(2.0, k)))) / 2.5;
-    let age = fract(cycle);
-    let ring = abs(length(p - drop) - age * 0.18) < 0.025 && age < 0.8;
-    let is_ripple = edge < 0.9 && ring && noise_hash(cell + vec2f(k, 5.0)) < g.rain.x;
+    let is_ripple = edge < 0.9 && ripple(p);
     if is_bank {
         water = WATER_BANK;
     }
