@@ -74,6 +74,7 @@ fn hash(i: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weather::tests::CLEAR;
 
     const NOON: f64 = 1.0;
     const DAY: f64 = 86_400.0;
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn real_weather_sets_the_cover_and_the_drift() {
-        let w = Weather { cover: 0.8, wind_from: 270.0, wind_kmh: 24.0, gust_kmh: 30.0 }; // a west wind
+        let w = Weather { cover: 0.8, wind_from: 270.0, wind_kmh: 24.0, gust_kmh: 30.0, ..CLEAR }; // a west wind
         assert_eq!(cover(1.8e9, NOON, Some(&w)), 0.8);
         assert_eq!(cover(1.8e9, -0.2, Some(&w)), 0.0, "none at night");
         let mut clouds = Clouds::default();

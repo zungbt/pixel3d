@@ -6,6 +6,7 @@ use jiff::tz::TimeZone;
 use meadow_core::clock;
 use meadow_core::sky::{self, Fog, SkyState};
 use meadow_core::sun::{self, Date, SunTimes};
+use meadow_core::weather::Weather;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -169,13 +170,17 @@ impl SkyClock {
         clock::hand_angles(h, m, s)
     }
 
-    /// The sky for right now; `anim_time` (s) only drives the cycle mode.
-    pub fn state(&self, anim_time: f64) -> SkyState {
+    /// The sky for right now; `anim_time` (s) only drives the cycle mode. Real `weather` sets the
+    /// automatic fog.
+    pub fn state(&self, anim_time: f64, weather: Option<&Weather>) -> SkyState {
         let now = now(&self.tz);
         let sun = sun::sun_times(now.date, now.offset_min, self.place);
         let winter = sun::winterness(now.date, self.place.0);
         let mut state = sky::sky_state(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time), winter);
-        state.fog = sky::fog_amount(self.fog, state.elevation, winter);
+        state.fog = match (self.fog, weather) {
+            (Fog::Auto, Some(w)) => w.fog(),
+            (mode, _) => sky::fog_amount(mode, state.elevation, winter),
+        };
         state
     }
 }

@@ -147,7 +147,11 @@ impl App {
             }
             return;
         }
-        let sky = self.sky.state(time);
+        #[cfg(windows)]
+        let weather = self.weather.current();
+        #[cfg(not(windows))]
+        let weather = None;
+        let sky = self.sky.state(time, weather.as_ref());
         let clock = ClockPose {
             hands: self.sky.hands(wreck.behind(unix)),
             fallen: wreck.progress(),
@@ -155,10 +159,6 @@ impl App {
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
-        #[cfg(windows)]
-        let weather = self.weather.current();
-        #[cfg(not(windows))]
-        let weather = None;
         scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock, weather.as_ref());
         for (i, frame) in frames {
             let view = frame.0.texture.create_view(&Default::default());

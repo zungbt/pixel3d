@@ -1,6 +1,8 @@
 //! Real weather from Open-Meteo (free, no key): the city search's places and a place's current
-//! cloud cover and wind. Only the URLs and the parsing live here; the HTTP is the exe's.
+//! cloud cover, wind and visibility. Only the URLs and the parsing live here; the HTTP is the exe's.
 use std::f64::consts::FRAC_PI_2;
+
+use crate::world::smoothstep;
 
 pub const SEARCH_HOST: &str = "geocoding-api.open-meteo.com";
 pub const FORECAST_HOST: &str = "api.open-meteo.com";
@@ -19,6 +21,8 @@ pub struct Weather {
     pub wind_from: f64, // degrees clockwise from north, where the wind comes from
     pub wind_kmh: f64,
     pub gust_kmh: f64, // the strongest gusts lately
+    pub visibility_m: f64,
+    pub code: u32, // WMO weather code: 45 and 48 fog, 51-67 drizzle and rain, 80-82 showers, 95-99 thunder
 }
 
 impl Weather {
@@ -26,6 +30,13 @@ impl Weather {
     /// at +x and stands at +z at noon), as an angle from +x.
     pub fn heading(&self) -> f64 {
         self.wind_from.to_radians() + FRAC_PI_2
+    }
+
+    /// The ground fog it makes, 0-1: thick under a kilometre's visibility, none past eight, and
+    /// a good deal whenever it's reported as fog.
+    pub fn fog(&self) -> f64 {
+        let thin = 1.0 - smoothstep(self.visibility_m, 1000.0, 8000.0);
+        if matches!(self.code, 45 | 48) { thin.max(0.8) } else { thin }
     }
 }
 
@@ -36,7 +47,7 @@ pub fn search_path(name: &str) -> String {
 
 /// Path and query for the current weather at `place` (lat, lon).
 pub fn current_path((lat, lon): (f64, f64)) -> String {
-    format!("/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m")
+    format!("/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code")
 }
 
 // Percent-encoding of everything but unreserved bytes, so a UTF-8 name like "Hà Nội" passes.
@@ -71,6 +82,8 @@ pub fn parse_current(body: &str) -> Result<Weather, String> {
         wind_from: field("wind_direction_10m")?,
         wind_kmh: field("wind_speed_10m")?.max(0.0),
         gust_kmh: field("wind_gusts_10m")?.max(0.0),
+        visibility_m: field("visibility")?.max(0.0),
+        code: field("weather_code")? as u32,
     })
 }
 
@@ -239,13 +252,13 @@ impl Parser<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Trimmed real replies.
     const SEARCH: &str = r#"{"results":[{"id":1581130,"name":"Hà Nội","latitude":21.0245,"longitude":105.84117,"elevation":21.0,"feature_code":"PPLC","country_code":"VN","admin1_id":1581129,"timezone":"Asia/Bangkok","population":8053663,"postcodes":["100000"],"country_id":1562822,"country":"Việt Nam","admin1":"Hà Nội"},
         {"id":2,"name":"Hanoi","latitude":-1.5e1,"longitude":30,"country":"Testé \"x\" 🌧"}],"generationtime_ms":0.53}"#;
-    const CURRENT: &str = r#"{"latitude":21.0,"longitude":105.875,"generationtime_ms":0.03,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT","elevation":16.0,"current_units":{"time":"iso8601","interval":"seconds","cloud_cover":"%","wind_speed_10m":"km/h","wind_direction_10m":"°","wind_gusts_10m":"km/h"},"current":{"time":"2026-10-13T08:00","interval":900,"cloud_cover":75,"wind_speed_10m":8.6,"wind_direction_10m":135,"wind_gusts_10m":19.8}}"#;
+    const CURRENT: &str = r#"{"latitude":21.0,"longitude":105.875,"generationtime_ms":0.03,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT","elevation":16.0,"current_units":{"time":"iso8601","interval":"seconds","cloud_cover":"%","wind_speed_10m":"km/h","wind_direction_10m":"°","wind_gusts_10m":"km/h","visibility":"m","weather_code":"wmo code"},"current":{"time":"2026-10-13T08:00","interval":900,"cloud_cover":75,"wind_speed_10m":8.6,"wind_direction_10m":135,"wind_gusts_10m":19.8,"visibility":24140.0,"weather_code":3}}"#;
 
     #[test]
     fn reads_the_search_results() {
@@ -259,7 +272,7 @@ mod tests {
 
     #[test]
     fn reads_the_current_weather() {
-        assert_eq!(parse_current(CURRENT), Ok(Weather { cover: 0.75, wind_from: 135.0, wind_kmh: 8.6, gust_kmh: 19.8 }));
+        assert_eq!(parse_current(CURRENT), Ok(Weather { cover: 0.75, wind_from: 135.0, wind_kmh: 8.6, gust_kmh: 19.8, visibility_m: 24140.0, code: 3 }));
         assert!(parse_current(r#"{"current":{"cloud_cover":10}}"#).is_err());
         assert!(parse_current(r#"{"error":true,"reason":"Latitude must be in range"}"#).is_err());
     }
@@ -267,13 +280,25 @@ mod tests {
     #[test]
     fn urls_are_encoded() {
         assert_eq!(search_path(" Hà Nội "), "/v1/search?name=H%C3%A0%20N%E1%BB%99i&count=10&language=vi&format=json");
-        assert_eq!(current_path((21.0245, 105.84117)), "/v1/forecast?latitude=21.0245&longitude=105.8412&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m");
+        assert_eq!(current_path((21.0245, 105.84117)), "/v1/forecast?latitude=21.0245&longitude=105.8412&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code");
+    }
+
+    pub const CLEAR: Weather = Weather { cover: 0.0, wind_from: 0.0, wind_kmh: 10.0, gust_kmh: 10.0, visibility_m: 24000.0, code: 0 };
+
+    #[test]
+    fn low_visibility_and_fog_reports_make_fog() {
+        assert_eq!(CLEAR.fog(), 0.0);
+        assert_eq!(Weather { visibility_m: 500.0, ..CLEAR }.fog(), 1.0);
+        let haze = Weather { visibility_m: 4500.0, ..CLEAR }.fog();
+        assert!((0.3..0.7).contains(&haze), "{haze}");
+        assert_eq!(Weather { code: 45, ..CLEAR }.fog(), 0.8, "reported fog, though it's clear here");
+        assert_eq!(Weather { code: 48, visibility_m: 200.0, ..CLEAR }.fog(), 1.0);
     }
 
     #[test]
     fn the_wind_blows_away_from_where_it_comes_from() {
         let toward = |from: f64| {
-            let h = Weather { cover: 0.0, wind_from: from, wind_kmh: 10.0, gust_kmh: 10.0 }.heading();
+            let h = Weather { wind_from: from, ..CLEAR }.heading();
             [h.cos(), h.sin()].map(|v| (v * 1e9).round() / 1e9 + 0.0)
         };
         assert_eq!(toward(0.0), [0.0, 1.0], "a north wind blows south (+z)");

@@ -81,6 +81,7 @@ pub const MADE_UP_LEAN: [f64; 2] = [FRAC_1_SQRT_2, -FRAC_1_SQRT_2];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weather::tests::CLEAR;
 
     #[test]
     fn the_made_up_wind_is_the_webs() {
@@ -104,7 +105,7 @@ mod tests {
 
     #[test]
     fn real_wind_eases_in_and_leans_downwind() {
-        let storm = Weather { cover: 1.0, wind_from: 270.0, wind_kmh: 30.0, gust_kmh: 55.0 }; // from the west
+        let storm = Weather { cover: 1.0, wind_from: 270.0, wind_kmh: 30.0, gust_kmh: 55.0, ..CLEAR }; // from the west
         let mut w = Wind::default();
         w.update(1.0, Some(&storm));
         assert!(w.strength > 1.0 && w.strength < 1.1, "eases: {}", w.strength);
@@ -115,7 +116,7 @@ mod tests {
         let [lx, lz] = w.lean();
         assert!(lx > 0.999 && lz.abs() < 0.01, "leans east: {lx}, {lz}");
         // Calm: a gentle sway.
-        let calm = Weather { cover: 0.0, wind_from: 90.0, wind_kmh: 2.0, gust_kmh: 4.0 };
+        let calm = Weather { wind_from: 90.0, wind_kmh: 2.0, gust_kmh: 4.0, ..CLEAR };
         for _ in 0..15 * 300 {
             w.update(1.0 / 15.0, Some(&calm));
         }
