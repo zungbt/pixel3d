@@ -119,7 +119,7 @@ pub fn place_outer(tiles: &[(i32, i32)]) -> Outer {
         layout.rocks.retain(|r| (x0..x0 + TILE).contains(&r.x) && (z0..z0 + TILE).contains(&r.z));
         let mask = CanopyMask::over(&layout.trees, square);
         let flowers = flowers::place_in(&mut Mulberry32::new(tile_seed(i, j, SALT_FLOWERS)), &mask, &layout.rocks, square, scaled(flowers::ATTEMPTS, SIZE - 0.2));
-        let blades = grass::place_blades(&mut Mulberry32::new(tile_seed(i, j, SALT_GRASS)), &mask, &layout.rocks, square, scaled(grass::ATTEMPTS, GROUND_SIZE - 0.2));
+        let blades = grass::place_blades(&mut Mulberry32::new(tile_seed(i, j, SALT_GRASS)), &mask, &layout.rocks, square, scaled(grass::ATTEMPTS, GROUND_SIZE));
         out.trees.extend(layout.trees);
         out.rocks.extend(layout.rocks);
         out.flowers.extend(flowers);
@@ -198,6 +198,16 @@ mod tests {
                 assert!((b.y - grid.at(x, z).0).abs() < 1e-5);
                 assert!((b.y as f64 - height_at(x, z)).abs() < 0.02);
             }
+            // Right up to every edge, so the grass runs on across the seams.
+            let (x0, z0) = tile_origin(i, j);
+            let gap = |d: fn(&grass::Blade, f64, f64) -> f64| o.blades.iter().map(|b| d(b, x0, z0)).fold(f64::INFINITY, f64::min);
+            let gaps = [
+                gap(|b, x0, _| b.x as f64 - x0),
+                gap(|b, x0, _| x0 + TILE - b.x as f64),
+                gap(|b, _, z0| b.z as f64 - z0),
+                gap(|b, _, z0| z0 + TILE - b.z as f64),
+            ];
+            assert!(gaps.iter().all(|&g| g < 0.02), "tile {i}, {j}: gaps to the edges {gaps:?}");
         }
     }
 
@@ -206,7 +216,7 @@ mod tests {
         let (i, j) = (2, -2);
         let grid = grass::GroundGrid::new(tile_area(i, j));
         let (x0, z0) = tile_origin(i, j);
-        // Interior vertices: the last row and column are never under a blade (darts stay 0.1 in).
+        // Not the far row and column: on the square's edge, where at() has no cell (darts stay inside).
         for k in 0..64 {
             for m in [0, 17, 63] {
                 let (x, z) = (x0 + k as f64 * world::GROUND_CELL, z0 + m as f64 * world::GROUND_CELL);
@@ -218,7 +228,7 @@ mod tests {
     #[test]
     fn tile_grass_density_matches_the_inner_world() {
         let inner = grass::place_grass(&world::place(42)).len() as f64 / grass::ATTEMPTS as f64;
-        let tile = place_outer(&[(2, 2)]).blades.len() as f64 / scaled(grass::ATTEMPTS, GROUND_SIZE - 0.2) as f64;
+        let tile = place_outer(&[(2, 2)]).blades.len() as f64 / scaled(grass::ATTEMPTS, GROUND_SIZE) as f64;
         assert!((0.75..=1.25).contains(&(tile / inner)), "tile {tile} vs inner {inner}");
     }
 }

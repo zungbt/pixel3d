@@ -92,11 +92,15 @@ pub fn place_grass(layout: &Layout) -> Vec<Blade> {
     place_blades(&mut Mulberry32::new(SEED), &mask, &layout.rocks, ground, ATTEMPTS)
 }
 
+// Darts cover all but a hair of the square, so neighbouring squares' grass meets with no gap, and
+// an f32 root never rounds onto the far edge (where GroundGrid::at has no cell).
+pub(crate) const INSET: f64 = 0.001;
+
 /// Blades over one square of ground, darts from the stream `rng`, thinned by `grass_density`.
 /// Roots sit on the square's own ground mesh (`GroundGrid`).
 pub fn place_blades(rng: &mut Mulberry32, mask: &CanopyMask, rocks: &[Rock], area: Area, attempts: u32) -> Vec<Blade> {
     let mut rand = || rng.next();
-    let half = area.size / 2.0 - 0.1; // just inside the square
+    let half = area.size / 2.0 - INSET;
     let ground = GroundGrid::new(area);
     let mut blades = Vec::new();
     for _ in 0..attempts {
@@ -239,7 +243,7 @@ mod tests {
         let mut off = 0.0f64; // farthest root from the terrain: the mesh's flat triangles cut its curves
         for b in blades {
             let (x, z) = (b.x as f64, b.z as f64);
-            let half = GROUND_SIZE / 2.0 - 0.1;
+            let half = GROUND_SIZE / 2.0 - INSET;
             assert!(x.abs() <= half && z.abs() <= half);
             off = off.max((b.y as f64 - height_at(x, z)).abs());
             assert!((0.7..=1.3).contains(&b.scale));
@@ -250,6 +254,11 @@ mod tests {
         // Out to the ground's edges, not just the 48 placement area.
         let far = |f: fn(&Blade) -> f32| blades.iter().map(|b| f(b).abs()).fold(0.0, f32::max);
         assert!(far(|b| b.x) > 31.0 && far(|b| b.z) > 31.0);
+        // Right up to every edge: a tile beside it would show a bare strip at the seam.
+        let half = (GROUND_SIZE / 2.0) as f32;
+        for edge in [|b: &Blade| b.x, |b: &Blade| -b.x, |b: &Blade| b.z, |b: &Blade| -b.z] {
+            assert!(blades.iter().any(|b| half - edge(b) < 0.02), "no blades along an edge");
+        }
     }
 
     #[test]
