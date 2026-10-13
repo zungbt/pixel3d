@@ -8,6 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
+use meadow_core::clouds::{self, Clouds};
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
 use meadow_core::frog::{self, Frog};
@@ -81,7 +82,8 @@ struct Globals {
     hemi_ground: [f32; 4],
     water_tint: [f32; 4],
     params: [f32; 4],
-    fog: [f32; 4], // rgb: ground fog colour, a: amount
+    fog: [f32; 4],    // rgb: ground fog colour, a: amount
+    clouds: [f32; 4], // xy: the big clouds' drift, zw: the wisps'
 }
 
 #[repr(C)]
@@ -361,6 +363,7 @@ pub struct Renderer {
     dial_pipeline: wgpu::RenderPipeline,
     post_clock: PostClock,
     frog: Frog,
+    clouds: Clouds,
     frog_draw: Draw,
     pixel_size: u32,
 }
@@ -811,6 +814,7 @@ impl Renderer {
             dial_pipeline,
             post_clock: PostClock::new(device, &world_layout),
             frog: Frog::new(),
+            clouds: Clouds::default(),
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
         }
@@ -925,14 +929,19 @@ impl Renderer {
         queue.write_buffer(&self.frog_draw.instances, 0, bytemuck::cast_slice(&parts));
     }
 
-    /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, with the
-    /// post clock as `clock`. Once per frame, before rendering the views.
-    pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, sky: &SkyState, clock: &ClockPose) {
+    /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, at unix
+    /// time `unix` (s, the weather's), with the post clock as `clock`. Once per frame, before
+    /// rendering the views.
+    pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose) {
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
         self.globals.params[0] = time as f32;
         self.globals.params[1] = dial_glow(sky) * clock.glow as f32;
+        self.clouds.update(time, dt);
+        self.globals.params[2] = clouds::cover(unix, sky.elevation) as f32;
+        let (big, wisps) = (self.clouds.big, self.clouds.wisps);
+        self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
     }
 
     /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),
@@ -1082,6 +1091,6 @@ mod tests {
             })
             .expect("Globals in common.wgsl");
         assert_eq!(span as usize, size_of::<Globals>());
-        assert_eq!(size_of::<Globals>(), 304, "three mat4 and seven vec4");
+        assert_eq!(size_of::<Globals>(), 320, "three mat4 and eight vec4");
     }
 }

@@ -139,7 +139,7 @@ impl App {
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
-        scene.renderer.update(&scene.gpu.queue, time, dt, &sky, &clock);
+        scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock);
         for (i, frame) in frames {
             let view = frame.0.texture.create_view(&Default::default());
             scene.renderer.render(&scene.gpu.device, &scene.gpu.queue, i, &view);
