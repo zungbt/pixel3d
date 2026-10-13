@@ -9,9 +9,11 @@ struct Globals {
     hemi_sky: vec4f,    // rgb × intensity
     hemi_ground: vec4f, // rgb × intensity
     water_tint: vec4f,  // white with a hint of the sky
-    params: vec4f,      // x: time (s), y: post clock face glow, z: cloud cover (0-1)
+    params: vec4f,      // x: time (s), y: post clock face glow, z: cloud cover (0-1), w: the wind's flutter
     fog: vec4f,         // rgb: ground fog colour, a: amount (0: none)
     clouds: vec4f,      // xy: the big clouds' drift, zw: the wisps' (world units)
+    wind: vec4f,        // xy: where the grass leans, z: the gusts' phase (s), w: their strength
+    rain: vec4f,        // x: how hard it's raining, y: how wet the meadow is (0-1)
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -51,8 +53,9 @@ fn model_matrix(v: VertexIn) -> mat4x4f {
     if p < 0.0 {
         return m;
     }
-    let t = g.params.x;
-    let sway = rot_x(0.02 * sin(t * 0.9 + p * 1.7)) * rot_z(0.035 * sin(t * 1.3 + p));
+    let t = g.wind.z;
+    let k = g.wind.w;
+    let sway = rot_x(0.02 * k * sin(t * 0.9 + p * 1.7)) * rot_z(0.035 * k * sin(t * 1.3 + p));
     return translate(v.base.xyz) * sway * translate(-v.base.xyz) * m;
 }
 

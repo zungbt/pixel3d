@@ -3,6 +3,7 @@
 //! or unexpected value falls back to the default.
 use crate::frame_pacer::parse_fps;
 use crate::sky::Fog;
+use crate::weather::City;
 
 pub const PIXEL_SIZES: [u32; 3] = [2, 3, 4]; // screen px per art pixel
 
@@ -86,10 +87,25 @@ impl Setting {
     }
 }
 
+/// The chosen city's name (its place is `place`, read by sun.rs).
+pub fn city(text: &str) -> Option<&str> {
+    stored(text, "city").filter(|v| !v.is_empty())
+}
+
+/// `text` with the city's name and place saved.
+pub fn save_city(text: &str, city: &City) -> String {
+    let text = put(text, "city", &city.name);
+    put(&text, "place", &format!("{:.4}, {:.4}", city.lat, city.lon))
+}
+
 /// `text` with the setting's line replaced, or added at the end; line endings kept.
 pub fn save(text: &str, setting: Setting) -> String {
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let (key, value) = setting.key_value();
+    put(text, key, &value)
+}
+
+fn put(text: &str, key: &str, value: &str) -> String {
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let line = format!("{key} = {value}").trim_end().to_string(); // no cap: `fps =`
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let ours = |l: &String| {
@@ -151,5 +167,15 @@ mod tests {
         let saved = save(text, Setting::Fps(Some(30)));
         assert_eq!(saved, "\u{feff}# Hanoi\r\nplace = 21.03, 105.85\r\n# fps = 60\r\nfps = 30\r\n", "Notepad's BOM and CRLF, comments untouched");
         assert_eq!(save("place = 1, 2", Setting::ShowClock(false)), "place = 1, 2\nshowClock = false\n");
+    }
+
+    #[test]
+    fn the_city_saves_with_its_place() {
+        let hanoi = City { name: "Hà Nội".into(), detail: "Việt Nam".into(), lat: 21.0245, lon: 105.84117 };
+        let text = save_city("fps = 20\nplace = 1, 2\n", &hanoi);
+        assert_eq!(text, "fps = 20\nplace = 21.0245, 105.8412\ncity = Hà Nội\n");
+        assert_eq!(city(&text), Some("Hà Nội"));
+        assert_eq!(crate::sun::parse_place(&text), Ok(Some((21.0245, 105.8412))));
+        assert_eq!(city("city =\n"), None);
     }
 }

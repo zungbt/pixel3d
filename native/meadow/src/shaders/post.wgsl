@@ -5,6 +5,7 @@ struct Post {
     art: vec2u,
     pixel_size: u32,
     manual_srgb: u32, // 1 when the swapchain isn't *Srgb, so the shader encodes
+    rain: vec4f,      // x: how hard it's raining, y: its clock (s), z: the streaks' slant, w: their brightness
 }
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
@@ -64,6 +65,24 @@ fn normal_edge(p: vec2i, depth: f32, normal: vec3f) -> f32 {
     return step(0.1, sum);
 }
 
+fn hash(a: i32, b: i32) -> f32 {
+    var h = u32(a) * 747796405u + u32(b) * 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    return f32((h >> 22u) ^ h) / 4294967295.0;
+}
+
+// Rain: streaks a few art pixels long falling down slanted columns, a drop in some of each
+// column's cells.
+fn rain_at(p: vec2i) -> f32 {
+    let r = post.rain;
+    let y = f32(p.y);
+    let col = i32(floor(f32(p.x) - y * r.z));
+    let v = y - r.y * (140.0 + 80.0 * hash(col, 0));
+    let cell = floor(v / 18.0);
+    let drop = hash(col, i32(cell)) < r.x * 0.5 && v - cell * 18.0 < 3.0 + 3.0 * r.x;
+    return select(0.0, 1.0, drop && r.x > 0.01);
+}
+
 fn srgb_encode(c: vec3f) -> vec3f {
     let lo = c * 12.92;
     let hi = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
@@ -80,6 +99,7 @@ fn fs_post(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let nei = normal_edge(p, depth, normal);
     let strength = select(1.0 + NORMAL_EDGE * nei, 1.0 - DEPTH_EDGE * dei, dei > 0.0);
     var out = clamp(color * strength, vec3f(0.0), vec3f(1.0));
+    out = mix(out, vec3f(0.75, 0.8, 0.9) * post.rain.w, 0.5 * rain_at(p));
     if post.manual_srgb == 1u {
         out = srgb_encode(out);
     }

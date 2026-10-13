@@ -3,9 +3,8 @@
 //! wind for anything sitting on a flower.
 use core::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 
-use libm::{hypot, sin, sqrt};
+use libm::{hypot, sqrt};
 
-use crate::grass::BLADE_H;
 use crate::world::{Layout, Rock, height_at};
 
 const ROAM_R: f64 = 13.0; // the part of the map that is on screen
@@ -144,15 +143,6 @@ pub fn avoid(obstacles: &[Obstacle], pos: &mut V3, vel: &mut V3, dt: f64, min_al
     }
 }
 
-/// The grass shader's travelling gust: the xz offset at time t of a point at local height y on
-/// something rooted at (x, z). Must match `gust` in scene.wgsl.
-pub fn wind_sway(t: f64, x: f64, z: f64, y: f64) -> (f64, f64) {
-    let sway = sin(t * 1.6 - (x + z) * 0.45) * 0.5 + 0.5;
-    let sway = sway * 0.12 + sin(t * 3.1 + x * 2.0) * 0.02;
-    let k = sway * (y / BLADE_H);
-    (0.7071 * k, -0.7071 * k)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,16 +186,5 @@ mod tests {
         let mut vel = V3::new(0.0, -1.0, 0.0);
         avoid(&[], &mut pos, &mut vel, 1.0 / 60.0, 0.15, None);
         assert!((pos.y - (height_at(0.0, 0.0) + 0.15)).abs() < 1e-12 && vel.y == 0.0);
-    }
-
-    #[test]
-    fn the_sway_is_the_grass_tips_and_grows_with_height() {
-        let (x0, z0) = wind_sway(2.0, 1.0, 3.0, 0.0);
-        assert_eq!((x0, z0), (0.0, -0.0));
-        let (x, z) = wind_sway(2.0, 1.0, 3.0, BLADE_H);
-        let sway = (sin(2.0 * 1.6 - 4.0 * 0.45) * 0.5 + 0.5) * 0.12 + sin(2.0 * 3.1 + 2.0) * 0.02;
-        assert!((x - 0.7071 * sway).abs() < 1e-12 && (z + 0.7071 * sway).abs() < 1e-12);
-        let (x2, _) = wind_sway(2.0, 1.0, 3.0, BLADE_H * 2.0);
-        assert!((x2 - 2.0 * x).abs() < 1e-12);
     }
 }
