@@ -948,7 +948,8 @@ impl Renderer {
         self.wind.update(dt, weather);
         self.rain.update(dt, weather);
         let lit = sky.daylight;
-        let sky = &self.rain.sky(sky);
+        let cover = clouds::cover(unix, sky.elevation, weather);
+        let sky = &self.rain.sky(&clouds::overcast(sky, cover));
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
@@ -964,7 +965,7 @@ impl Renderer {
         self.globals.wind = [lx, lz, self.wind.phase, self.wind.strength].map(|v| v as f32);
         self.globals.params[3] = self.wind.flutter as f32;
         self.clouds.update(time, dt, weather, &self.wind);
-        self.globals.params[2] = clouds::cover(unix, sky.elevation, weather) as f32;
+        self.globals.params[2] = cover as f32;
         let (big, wisps) = (self.clouds.big, self.clouds.wisps);
         self.globals.clouds = [big[0], big[1], wisps[0], wisps[1]].map(|v| v as f32);
     }

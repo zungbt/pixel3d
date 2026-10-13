@@ -5,6 +5,7 @@ use std::f64::consts::TAU;
 
 use libm::{cos, floor, sin};
 
+use crate::sky::{Rgb, SkyState};
 use crate::weather::Weather;
 use crate::wind::Wind;
 use crate::world::{lerp, smoothstep};
@@ -19,6 +20,7 @@ const GUST_PULL: f64 = 0.15; // a full grass gust drifts the clouds this much fa
 const SPELL: f64 = 1200.0; // s: the weather changes over some twenty minutes
 const REAL_VEER: f64 = 0.15; // rad: with the real wind, only a little swing about it
 const WIND_KMH: f64 = 12.0; // the real wind that drifts the clouds at the made-up speeds
+const OVERCAST: (f64, f64) = (0.6, 1.0); // cover over which the sun goes behind the cloud
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clouds {
@@ -40,6 +42,23 @@ impl Clouds {
             layer[0] += cos(heading + turn) * layer_speed * pull * dt;
             layer[1] += sin(heading + turn) * layer_speed * pull * dt;
         }
+    }
+}
+
+/// `sky` under `cover`: past OVERCAST.0 the sun fades behind the cloud (to 15% at full cover)
+/// and the light turns flat, greyer and a little brighter all round, so an overcast meadow has
+/// no sunny patches and hardly any shadows.
+pub fn overcast(sky: &SkyState, cover: f64) -> SkyState {
+    let o = smoothstep(cover, OVERCAST.0, OVERCAST.1);
+    let grey = |c: Rgb, k: f64| {
+        let l = (c[0] + c[1] + c[2]) / 3.0;
+        c.map(|v| lerp(v, l, 0.5 * o) * k)
+    };
+    SkyState {
+        sun_color: sky.sun_color.map(|v| v * (1.0 - 0.85 * o)),
+        hemi_sky: grey(sky.hemi_sky, 1.0 + 0.5 * o),
+        fog_color: grey(sky.fog_color, 1.0),
+        ..*sky
     }
 }
 
@@ -119,6 +138,16 @@ mod tests {
         assert!((BIG_SPEED * 60.0..BIG_SPEED * 60.0 * 1.15).contains(&dist), "{dist}");
         let turn = clouds.wisps[1].atan2(clouds.wisps[0]) - clouds.big[1].atan2(clouds.big[0]);
         assert!((turn - SHEAR).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_overcast_sky_hides_the_sun() {
+        let sky = crate::sky::sky_state(crate::sky::NOON, 0.0);
+        assert_eq!(format!("{:?}", overcast(&sky, 0.6)), format!("{sky:?}"), "broken cloud: as before");
+        let grey = overcast(&sky, 1.0);
+        assert!((grey.sun_color[0] - sky.sun_color[0] * 0.15).abs() < 1e-12);
+        assert!(grey.hemi_sky.iter().sum::<f64>() > sky.hemi_sky.iter().sum::<f64>() * 1.4);
+        assert!(grey.hemi_sky[2] - grey.hemi_sky[0] < sky.hemi_sky[2] - sky.hemi_sky[0], "greyer");
     }
 
     #[test]
