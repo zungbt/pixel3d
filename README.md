@@ -29,11 +29,26 @@ npm run preview    # serve the build
 | `src/gnats.js` | Gnats: dusk and dawn swarms over the pond rim, scattered by hunting dragonflies |
 | `src/motion.js` | Shared motion helpers: per-insect random streams, easing, turning spring, weighted choice |
 | `src/frame-limiter.js` | Frame-rate cap behind the fps selector |
-| `src/sky.js` | Sun, day–night cycle, clouds and cloud shadows |
+| `src/settings.js` | Viewer settings, each remembered in its own localStorage key |
+| `src/clock.js` | Park post clock beside the path, showing the viewer's local time |
+| `src/sun.js` | Sunrise/sunset for the viewer's date, place guessed from the time zone |
+| `src/sky.js` | Sun light, day–night cycle (clock hour ↔ sky phase), ground fog, clouds and cloud shadows |
+| `src/bench.js` | Perf baseline behind `?bench`: CPU stage, draw-call and GPU timings per hour |
 
 ## Controls
 
-Bottom-left: a time-of-day slider (jumps the sky clock) and a frame-rate cap (Native / 60 / 30 / 20, remembered).
+Bottom-left: a time-of-day slider (jumps the sky clock) and a ⚙ button opening the settings, each remembered:
+
+| Setting | Options |
+|---|---|
+| Pixel size | 2 / 3 / 4 device px per art pixel |
+| FPS cap | Native / 60 / 30 / 20 / 15 (default 15) |
+| Time | Manual (the slider) / Clock (the sky follows the local time, sunrise and sunset guessed from the time zone) |
+| Fog | Off / Auto (rolls in at dusk, burns off after sunrise, thicker in winter) / Always |
+| Hide HUD | Hides the slider and dims the ⚙ button |
+| Show clock | The post clock beside the path |
+
+`?wallpaper` hides the HUD, follows the local clock and caps at 15 fps for that page only, leaving the saved settings alone.
 
 ## Conventions
 
