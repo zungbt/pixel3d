@@ -196,8 +196,9 @@ impl SkyClock {
         if self.travel.is_some_and(|trip| t - trip.start >= TRAVEL_SECS) {
             self.travel = None;
         }
-        let slide = km * CLOUD_PER_KM;
-        [-bearing.sin() * slide, bearing.cos() * slide]
+        // Against the way travelled, on the compass the sun is placed by (east right, north up).
+        let (east, north) = (-bearing.sin() * km * CLOUD_PER_KM, -bearing.cos() * km * CLOUD_PER_KM);
+        [east * sky::EAST[0] + north * sky::NORTH[0], east * sky::EAST[1] + north * sky::NORTH[1]]
     }
 
     /// The local clock, or (false) the web's 300 s day carrying on from the time shown now.
@@ -302,18 +303,28 @@ mod tests {
 
     #[test]
     fn clouds_slide_against_the_way_the_sky_travels_by_the_whole_distance() {
-        let mut sky = sky_at("place = 0, 0\n");
-        sky.set_place((0.0, 90.0), 0.0); // due east
-        let mut total = [0.0, 0.0];
-        for k in 1..=60 {
-            let s = sky.advance(k as f64 * TRAVEL_SECS / 60.0);
-            total[0] += s[0];
-            total[1] += s[1];
-        }
-        let (km, _) = sun::step((0.0, 0.0), (0.0, 90.0));
-        assert!((total[0] + km * CLOUD_PER_KM).abs() < 1e-3, "west by the distance: {total:?}");
-        assert!(total[1].abs() < 1e-6, "none north-south: {total:?}");
-        assert_eq!(sky.advance(TRAVEL_SECS + 1.0), [0.0, 0.0], "arrived: nothing more");
+        // The sun's own compass: north is the top of the screen, east its right (sky.rs).
+        let slid = |to: (f64, f64)| {
+            let mut sky = sky_at("place = 0, 0\n");
+            sky.set_place(to, 0.0);
+            let mut total = [0.0, 0.0];
+            for k in 1..=60 {
+                let s = sky.advance(k as f64 * TRAVEL_SECS / 60.0);
+                total[0] += s[0];
+                total[1] += s[1];
+            }
+            assert_eq!(sky.advance(TRAVEL_SECS + 1.0), [0.0, 0.0], "arrived: nothing more");
+            let (km, _) = sun::step((0.0, 0.0), to);
+            (total, km * CLOUD_PER_KM)
+        };
+        // Due east: the clouds go to the screen's left, i.e. against EAST.
+        let (total, by) = slid((0.0, 90.0));
+        let want = [-sky::EAST[0] * by, -sky::EAST[1] * by];
+        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "east: {total:?} not {want:?}");
+        // Due north: down the screen, against NORTH.
+        let (total, by) = slid((10.0, 0.0));
+        let want = [-sky::NORTH[0] * by, -sky::NORTH[1] * by];
+        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "north: {total:?} not {want:?}");
     }
 
     #[test]

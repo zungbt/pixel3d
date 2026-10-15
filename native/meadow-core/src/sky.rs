@@ -107,12 +107,15 @@ pub fn phase(day_t: f64) -> f64 {
     (day_t / DAY_LENGTH + DAY_START) % 1.0
 }
 
+/// The compass in world x, z: north is the top of the screen (the camera looks down -x -z), east
+/// its right.
+pub const NORTH: [f64; 2] = [-FRAC_1_SQRT_2, -FRAC_1_SQRT_2];
+pub const EAST: [f64; 2] = [FRAC_1_SQRT_2, -FRAC_1_SQRT_2];
+
 /// The sky with the sun where it really stands: `elevation` and `azimuth` (radians, clockwise from
-/// north) as sun::sun_position. North is the top of the screen (the camera looks down -x -z),
-/// east its right. The moon stands across the sky from the sun, as high as the sun is low.
+/// north) as sun::sun_position, on the NORTH / EAST compass. The moon stands across the sky from
+/// the sun, as high as the sun is low.
 pub fn sky_at(phase: f64, elevation: f64, azimuth: f64, winter: f64) -> SkyState {
-    const NORTH: [f64; 2] = [-FRAC_1_SQRT_2, -FRAC_1_SQRT_2]; // world xz
-    const EAST: [f64; 2] = [FRAC_1_SQRT_2, -FRAC_1_SQRT_2];
     let (up, flat) = (sin(elevation), cos(elevation) * SUN_DIST);
     let k = if up >= 0.0 { flat } else { -flat };
     let (e, n) = (sin(azimuth) * k, cos(azimuth) * k);
