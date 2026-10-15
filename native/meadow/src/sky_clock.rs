@@ -8,6 +8,17 @@ use meadow_core::clock;
 use meadow_core::sky::{self, Fog, SkyState};
 use meadow_core::sun::{self, Date, SunTimes};
 use meadow_core::weather::Weather;
+use meadow_core::world::smoothstep;
+
+const TRAVEL_SECS: f64 = 6.0; // a new city is reached in this long
+const CLOUD_PER_KM: f64 = 0.02; // world units the clouds slide per km the sky travels
+
+/// A trip from where the sky was last drawn to the chosen place.
+#[derive(Clone, Copy)]
+struct Travel {
+    from: (f64, f64),
+    start: f64, // animation time
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -20,6 +31,8 @@ pub struct SkyClock {
     mode: Mode,
     tz: TimeZone,
     place: (f64, f64),
+    travel: Option<Travel>, // None once arrived
+    shown: (f64, f64),      // where the sky was last drawn: a new trip starts here
     cycle_start: f64, // cycle mode: day_t at animation time 0
     date: Option<(u8, u8)>, // --date: (month, day) pinned
     pub fog: Fog,
@@ -148,16 +161,43 @@ impl SkyClock {
             hhmm(today.rise),
             hhmm(today.set),
         );
-        Self { mode, tz, place, cycle_start, date, fog }
+        Self { mode, tz, place, travel: None, shown: place, cycle_start, date, fog }
     }
 
-    /// A city was chosen: the sun rises and sets there from now on.
+    /// A city was chosen: the sky travels to it, from where it stands now, over TRAVEL_SECS from
+    /// animation time `now`; the sun rises and sets there afterwards.
     #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
-    pub fn set_place(&mut self, place: (f64, f64)) {
+    pub fn set_place(&mut self, place: (f64, f64), now: f64) {
+        self.travel = Some(Travel { from: self.shown, start: now });
         self.place = place;
-        let now = today(&self.tz, self.date);
-        let today = sun::sun_times(now.date, now.offset_min, place);
+        let day = today(&self.tz, self.date);
+        let today = sun::sun_times(day.date, day.offset_min, place);
         log::info!("sky: place {:.2}, {:.2}, rise {}, set {}", place.0, place.1, hhmm(today.rise), hhmm(today.set));
+    }
+
+    /// Where the sky is at animation time `t` (s): on the great circle from the old city to the
+    /// chosen one, or at the chosen one.
+    pub fn place_at(&self, t: f64) -> (f64, f64) {
+        match self.travel {
+            Some(Travel { from, start }) => {
+                let f = smoothstep(((t - start) / TRAVEL_SECS).clamp(0.0, 1.0), 0.0, 1.0);
+                sun::great_circle(from, self.place, f)
+            }
+            None => self.place,
+        }
+    }
+
+    /// Notes that the sky is drawn at `t` and returns how far the clouds slide over the ground
+    /// (world x, z) since the last frame: against the way the sky travelled, `CLOUD_PER_KM` a km.
+    pub fn advance(&mut self, t: f64) -> [f64; 2] {
+        let here = self.place_at(t);
+        let (km, bearing) = sun::step(self.shown, here);
+        self.shown = here;
+        if self.travel.is_some_and(|trip| t - trip.start >= TRAVEL_SECS) {
+            self.travel = None;
+        }
+        let slide = km * CLOUD_PER_KM;
+        [-bearing.sin() * slide, bearing.cos() * slide]
     }
 
     /// The local clock, or (false) the web's 300 s day carrying on from the time shown now.
@@ -168,7 +208,7 @@ impl SkyClock {
         }
         if !matches!(self.mode, Mode::Cycle(_)) {
             let now = today(&self.tz, self.date);
-            let shown = day_t(self.mode, now.hour, sun::sun_times(now.date, now.offset_min, self.place), self.cycle_start, anim_time);
+            let shown = day_t(self.mode, now.hour, sun::sun_times(now.date, now.offset_min, self.place_at(anim_time)), self.cycle_start, anim_time);
             self.cycle_start = carry_on(shown, anim_time);
             self.mode = Mode::Cycle(None);
         }
@@ -185,10 +225,11 @@ impl SkyClock {
     /// drives the cycle mode. Real `weather` sets the automatic fog.
     pub fn state(&self, anim_time: f64, weather: Option<&Weather>) -> SkyState {
         let now = today(&self.tz, self.date);
-        let sun = sun::sun_times(now.date, now.offset_min, self.place);
-        let winter = sun::winterness(now.date, self.place.0);
+        let place = self.place_at(anim_time);
+        let sun = sun::sun_times(now.date, now.offset_min, place);
+        let winter = sun::winterness(now.date, place.0);
         let phase = sky::phase(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time));
-        let (elevation, azimuth) = sun::sun_position(now.date, sky::phase_to_hour(phase, sun), now.offset_min, self.place);
+        let (elevation, azimuth) = sun::sun_position(now.date, sky::phase_to_hour(phase, sun), now.offset_min, place);
         let mut state = sky::sky_at(phase, elevation, azimuth, winter);
         state.fog = match (self.fog, weather) {
             (Fog::Auto, Some(w)) => w.fog(),
@@ -229,6 +270,67 @@ mod tests {
             assert!((day_t(Mode::Cycle(None), 13.0, SUN, start, anim) - shown).abs() < 1e-9, "at animation time {anim}");
             assert!(day_t(Mode::Cycle(None), 13.0, SUN, start, anim + 1.0) > shown, "and moves on");
         }
+    }
+
+    fn sky_at(place: &str) -> SkyClock {
+        SkyClock::new(Mode::Hour(12.0), None, Some(place), Fog::Auto)
+    }
+
+    #[test]
+    fn a_new_city_is_reached_along_the_great_circle_in_the_trip_time() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_place((0.0, 90.0), 100.0);
+        let start = sky.place_at(100.0);
+        assert!(start.0.abs() < 1e-6 && start.1.abs() < 1e-6, "starts where it was: {start:?}");
+        let mid = sky.place_at(100.0 + TRAVEL_SECS / 2.0);
+        assert!(mid.0.abs() < 1e-6 && (mid.1 - 45.0).abs() < 1e-6, "halfway at half the time: {mid:?}");
+        let end = sky.place_at(100.0 + TRAVEL_SECS);
+        assert!(end.0.abs() < 1e-6 && (end.1 - 90.0).abs() < 1e-6, "arrived: {end:?}");
+    }
+
+    #[test]
+    fn a_second_city_chosen_mid_trip_starts_from_where_the_sky_was_drawn() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_place((0.0, 90.0), 0.0);
+        sky.advance(TRAVEL_SECS / 2.0); // drawn at 45°E
+        sky.set_place((0.0, -90.0), TRAVEL_SECS / 2.0);
+        let p = sky.place_at(TRAVEL_SECS / 2.0);
+        assert!((p.1 - 45.0).abs() < 1e-6, "no jump: {p:?}");
+        let end = sky.place_at(TRAVEL_SECS / 2.0 + TRAVEL_SECS);
+        assert!((end.1 + 90.0).abs() < 1e-6, "and ends at the second city: {end:?}");
+    }
+
+    #[test]
+    fn clouds_slide_against_the_way_the_sky_travels_by_the_whole_distance() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_place((0.0, 90.0), 0.0); // due east
+        let mut total = [0.0, 0.0];
+        for k in 1..=60 {
+            let s = sky.advance(k as f64 * TRAVEL_SECS / 60.0);
+            total[0] += s[0];
+            total[1] += s[1];
+        }
+        let (km, _) = sun::step((0.0, 0.0), (0.0, 90.0));
+        assert!((total[0] + km * CLOUD_PER_KM).abs() < 1e-3, "west by the distance: {total:?}");
+        assert!(total[1].abs() < 1e-6, "none north-south: {total:?}");
+        assert_eq!(sky.advance(TRAVEL_SECS + 1.0), [0.0, 0.0], "arrived: nothing more");
+    }
+
+    #[test]
+    fn a_frame_at_an_unchanged_time_slides_nothing() {
+        // An occluded app doesn't advance its animation time: the trip waits, then resumes.
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_place((0.0, 90.0), 0.0);
+        sky.advance(2.0);
+        assert_eq!(sky.advance(2.0), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn choosing_the_same_city_again_changes_nothing() {
+        let mut sky = sky_at("place = 10.8, 106.7\n");
+        sky.set_place((10.8, 106.7), 5.0);
+        assert_eq!(sky.advance(6.0), [0.0, 0.0]);
+        assert_eq!(sky.place_at(6.0), (10.8, 106.7));
     }
 
     #[test]
