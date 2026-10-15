@@ -1,5 +1,6 @@
 //! The time of day on screen: the PC's local clock (or, for testing, a pinned hour or the web's
-//! 300 s day), at the place guessed from the system time zone unless settings.txt names one.
+//! 300 s day), at the place guessed from the system time zone unless settings.txt names one,
+//! with the sun where it stands there on that date.
 //! Read every frame, so midnight, DST changes and long pauses need nothing special.
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -20,6 +21,7 @@ pub struct SkyClock {
     tz: TimeZone,
     place: (f64, f64),
     cycle_start: f64, // cycle mode: day_t at animation time 0
+    date: Option<(u8, u8)>, // --date: (month, day) pinned
     pub fog: Fog,
 }
 
@@ -32,6 +34,15 @@ struct Now {
 
 fn now(tz: &TimeZone) -> Now {
     at(tz, Timestamp::now())
+}
+
+/// Today, or the --date pinned this run.
+fn today(tz: &TimeZone, date: Option<(u8, u8)>) -> Now {
+    let mut now = now(tz);
+    if let Some((month, day)) = date {
+        now.date = Date { month, day, ..now.date };
+    }
+    now
 }
 
 fn at(tz: &TimeZone, t: Timestamp) -> Now {
@@ -102,12 +113,12 @@ pub fn read_settings(path: &std::path::Path) -> Result<Option<String>, String> {
 
 impl SkyClock {
     /// `settings`: the text of %APPDATA%\pixel3d\settings.txt, if there is one.
-    pub fn new(mode: Mode, settings: Option<&str>, fog: Fog) -> Self {
+    pub fn new(mode: Mode, date: Option<(u8, u8)>, settings: Option<&str>, fog: Fog) -> Self {
         let tz = TimeZone::try_system().unwrap_or_else(|e| {
             log::warn!("sky: no system time zone ({e}), using the OS's current UTC offset");
             fallback_zone(os_offset_min())
         });
-        let now = now(&tz);
+        let now = today(&tz, date);
         let zone = tz.iana_name();
         let guess = || (sun::zone_place(zone, now.offset_min), "zone guess");
         let (place, source) = match settings.map_or(Ok(None), sun::parse_place) {
@@ -137,14 +148,14 @@ impl SkyClock {
             hhmm(today.rise),
             hhmm(today.set),
         );
-        Self { mode, tz, place, cycle_start, fog }
+        Self { mode, tz, place, cycle_start, date, fog }
     }
 
     /// A city was chosen: the sun rises and sets there from now on.
     #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
     pub fn set_place(&mut self, place: (f64, f64)) {
         self.place = place;
-        let now = now(&self.tz);
+        let now = today(&self.tz, self.date);
         let today = sun::sun_times(now.date, now.offset_min, place);
         log::info!("sky: place {:.2}, {:.2}, rise {}, set {}", place.0, place.1, hhmm(today.rise), hhmm(today.set));
     }
@@ -156,7 +167,7 @@ impl SkyClock {
             return;
         }
         if !matches!(self.mode, Mode::Cycle(_)) {
-            let now = now(&self.tz);
+            let now = today(&self.tz, self.date);
             let shown = day_t(self.mode, now.hour, sun::sun_times(now.date, now.offset_min, self.place), self.cycle_start, anim_time);
             self.cycle_start = carry_on(shown, anim_time);
             self.mode = Mode::Cycle(None);
@@ -170,13 +181,15 @@ impl SkyClock {
         clock::hand_angles(h, m, s)
     }
 
-    /// The sky for right now; `anim_time` (s) only drives the cycle mode. Real `weather` sets the
-    /// automatic fog.
+    /// The sky for right now, the sun where it stands at the hour shown; `anim_time` (s) only
+    /// drives the cycle mode. Real `weather` sets the automatic fog.
     pub fn state(&self, anim_time: f64, weather: Option<&Weather>) -> SkyState {
-        let now = now(&self.tz);
+        let now = today(&self.tz, self.date);
         let sun = sun::sun_times(now.date, now.offset_min, self.place);
         let winter = sun::winterness(now.date, self.place.0);
-        let mut state = sky::sky_state(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time), winter);
+        let phase = sky::phase(day_t(self.mode, now.hour, sun, self.cycle_start, anim_time));
+        let (elevation, azimuth) = sun::sun_position(now.date, sky::phase_to_hour(phase, sun), now.offset_min, self.place);
+        let mut state = sky::sky_at(phase, elevation, azimuth, winter);
         state.fog = match (self.fog, weather) {
             (Fog::Auto, Some(w)) => w.fog(),
             (mode, _) => sky::fog_amount(mode, state.elevation, winter),
