@@ -10,6 +10,12 @@
 // (pin the sky at local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the
 // clock), --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
 // WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams).
+// --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
+// local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
+// --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
+// WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams),
+// --gpu-time (log the first screen's GPU ms per pass with the fps), --fullscreen (windowed:
+// borderless fullscreen on the current monitor).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -17,6 +23,7 @@ mod camera;
 #[cfg(windows)]
 mod city;
 mod gpu;
+mod gpu_timer;
 mod grass;
 mod mesh;
 #[cfg(windows)]
@@ -71,6 +78,8 @@ struct App {
     toggle_clock: Option<(f64, f64)>, // --toggle-clock: every, next (animation time, s)
     frames: u32,
     window_start: Instant,
+    gpu_time: bool, // --gpu-time
+    fullscreen: bool, // --fullscreen
     #[cfg(windows)]
     desktop: Option<wallpaper::Desktop>, // Some in wallpaper mode
     #[cfg(windows)]
@@ -179,6 +188,10 @@ impl App {
         let elapsed = self.window_start.elapsed();
         if elapsed >= Duration::from_secs(5) {
             log::info!("{:.1} fps", self.frames as f64 / elapsed.as_secs_f64());
+            if let Some(ms) = scene.renderer.timer.as_mut().and_then(|t| t.take()) {
+                let passes: Vec<_> = gpu_timer::PASSES.iter().zip(ms).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
+                log::info!("gpu ms: {}, total {:.2}", passes.join(", "), ms.iter().sum::<f64>());
+            }
             self.frames = 0;
             self.window_start = Instant::now();
         }
@@ -189,6 +202,7 @@ impl App {
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut windows: Vec<(WindowAttributes, Option<Screen>)> = match &self.screens {
             Some(screens) => screens.iter().map(|&sc| (normal.clone().with_inner_size(PhysicalSize::new(sc.size.0, sc.size.1)).with_resizable(false), Some(sc))).collect(),
+            None if self.fullscreen => vec![(normal.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None))), None)],
             None => vec![(normal.with_inner_size(winit::dpi::LogicalSize::new(1280, 720)), None)],
         };
         #[cfg(windows)]
@@ -203,7 +217,7 @@ impl App {
         }
         let mut created = windows.into_iter().map(|(attrs, sc)| (Arc::new(event_loop.create_window(attrs).expect("create window")), sc));
         let (first, first_screen) = created.next().expect("a window");
-        let (gpu, surface) = Gpu::new(first);
+        let (gpu, surface) = Gpu::new(first, self.gpu_time);
         let format = surface.config.format;
         let mut surfaces = vec![surface];
         let mut placed = vec![first_screen];
@@ -216,6 +230,13 @@ impl App {
             surfaces.iter().zip(placed).map(|(s, sc)| Screen { offset: sc.map_or((0, 0), |sc| sc.offset), size: (s.config.width, s.config.height) }).collect();
         log::info!("screens: {screens:?}");
         let mut renderer = Renderer::new(&gpu.device, format, &screens, self.settings.pixel_size);
+        if self.gpu_time {
+            if gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                renderer.timer = Some(gpu_timer::GpuTimer::new(&gpu.device, &gpu.queue));
+            } else {
+                log::warn!("--gpu-time: no timestamp queries on this adapter");
+            }
+        }
         for (i, s) in surfaces.iter().enumerate() {
             renderer.resize(&gpu.device, &gpu.queue, i, s.config.width, s.config.height);
         }
@@ -474,6 +495,15 @@ fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
+/// "MM-DD" for --date; days up to the month's length in a leap year.
+fn parse_date(v: &str) -> Option<(u8, u8)> {
+    let (m, d) = v.split_once('-')?;
+    let (m, d): (u8, u8) = (m.parse().ok()?, d.parse().ok()?);
+    const DAYS: [u8; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    (1..=12).contains(&m).then_some(())?;
+    (1..=DAYS[m as usize - 1]).contains(&d).then_some((m, d))
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
@@ -555,6 +585,7 @@ fn main() {
     if !matches!(mode, sky_clock::Mode::Hour(_)) {
         settings.clock = mode == sky_clock::Mode::Clock;
     }
+    let date = arg(&args, "--date").map(|v| parse_date(&v).unwrap_or_else(|| panic!("--date must be MM-DD, like 12-21, got {v}")));
     let screens = arg(&args, "--screens").map(|v| parse_screens(&v).unwrap_or_else(|| panic!("--screens must be like 1280x720+0+0,960x540+170+720, got {v}")));
     let toggle_clock = arg(&args, "--toggle-clock").map(|v| v.parse().ok().filter(|s: &f64| *s > 0.0).unwrap_or_else(|| panic!("--toggle-clock must be seconds, like 8, got {v}")));
     log::info!("settings: {settings:?}");
@@ -569,7 +600,7 @@ fn main() {
     }
     let now = Instant::now();
     let mut app = App {
-        sky: sky_clock::SkyClock::new(mode, text.as_deref(), settings.fog),
+        sky: sky_clock::SkyClock::new(mode, date, text.as_deref(), settings.fog),
         // Off since `brokenAt` (or now, if that's missing).
         wreck: Wreck::new((!settings.show_clock).then(|| settings.broken_at.map_or_else(unix_now, |t| t as f64))),
         toggle_clock: toggle_clock.map(|every| (every, every)),
@@ -585,6 +616,8 @@ fn main() {
         time: 0.0,
         frames: 0,
         window_start: now,
+        gpu_time: args.iter().any(|a| a == "--gpu-time"),
+        fullscreen: args.iter().any(|a| a == "--fullscreen"),
         #[cfg(windows)]
         desktop: wallpaper.then(wallpaper::Desktop::new),
         #[cfg(windows)]

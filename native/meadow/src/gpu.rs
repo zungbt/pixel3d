@@ -27,8 +27,9 @@ pub enum Missed {
 }
 
 impl Gpu {
-    /// The device is picked to present to the first window's surface.
-    pub fn new(window: Arc<Window>) -> (Self, Surface) {
+    /// The device is picked to present to the first window's surface; with `timestamps` (--gpu-time)
+    /// it gets timestamp queries if the adapter has them.
+    pub fn new(window: Arc<Window>, timestamps: bool) -> (Self, Surface) {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::VULKAN; // probing DX12 and GL as well loads their DLLs: +14 MB
         let instance = wgpu::Instance::new(desc.with_env());
@@ -40,7 +41,9 @@ impl Gpu {
         .expect("no adapter");
         let info = adapter.get_info();
         log::info!("adapter: {} ({:?}), driver {}", info.name, info.backend, info.driver_info);
+        let timestamps = timestamps && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: if timestamps { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() },
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))

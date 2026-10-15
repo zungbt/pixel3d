@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::fmt::Write;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use glam::{Mat2, Mat4, Quat, Vec2, Vec3, Vec4};
 use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::clouds::{self, Clouds};
@@ -27,12 +27,17 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{self, Pane};
 use crate::grass::{self, Grass};
+use crate::gpu_timer::GpuTimer;
 use crate::mesh::{self, MeshData, Vertex};
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
+const CLOUD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+// The cloud map's texel in view units: 3 art pixels at pixel size 3 on a 1080p primary. It holds a
+// smooth depth, sampled bilinear and stepped after, so it can be this coarse.
+const CLOUD_TEXEL: f32 = 0.15;
 
 // Web palette (sRGB hex). The time-of-day lights come from meadow_core::sky each frame; the ground
 // half of the hemisphere light stays fixed, as the web's.
@@ -90,6 +95,7 @@ struct Globals {
     clouds: [f32; 4], // xy: the clouds' drift, zw: unused
     wind: [f32; 4],   // xy: where the grass leans, z: the gusts' phase (s), w: their strength
     rain: [f32; 4],   // x: how hard it's raining, y: how wet the meadow is
+    cloud_map: [[f32; 4]; 4], // each view's (cloud_map): world xz to its uv and back
 }
 
 #[repr(C)]
@@ -305,12 +311,25 @@ fn dial_glow(sky: &SkyState) -> f32 {
     ((0.25 + 0.25 * (1.0 - sky.daylight)) * (1.0 - 0.6 * sky.fog)) as f32
 }
 
-// Art-resolution targets, rebuilt with the post bind group that reads them.
+// Art-resolution targets, rebuilt with the post bind group that reads them; and the cloud map over
+// the pane's ground, with the scene bind group that reads it and the shadow map.
 struct Targets {
     color: wgpu::TextureView,
     normal: wgpu::TextureView,
     depth: wgpu::TextureView,
     post: wgpu::BindGroup,
+    clouds: wgpu::TextureView,
+    cloud_map: [[f32; 4]; 4],
+    scene: wgpu::BindGroup,
+}
+
+// What every view's targets are bound with.
+struct Binds {
+    post_layout: wgpu::BindGroupLayout,
+    scene_layout: wgpu::BindGroupLayout,
+    shadow_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    cloud_sampler: wgpu::Sampler,
 }
 
 /// A screen in physical px: its top-left corner relative to the primary's, and its size. The first
@@ -341,16 +360,15 @@ pub struct Renderer {
     globals: Globals, // the shared part; each view adds its cameras
     sun: Vec3,
     background: Vec3, // this frame's sky: the scene pass's clear colour
-    shadow_view: wgpu::TextureView,
-    shadow_group: wgpu::BindGroup,
+    binds: Binds,
     shadow_pipeline: wgpu::RenderPipeline,
+    cloud_pipeline: wgpu::RenderPipeline,
     toon_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     insect_pipeline: wgpu::RenderPipeline,
     grass_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
-    post_layout: wgpu::BindGroupLayout,
     manual_srgb: bool,
     draws: Vec<Draw>,
     views: Vec<View>,
@@ -376,6 +394,7 @@ pub struct Renderer {
     post_rain: [f32; 4],
     frog_draw: Draw,
     pixel_size: u32,
+    pub timer: Option<GpuTimer>, // --gpu-time
 }
 
 /// WGSL constants from meadow_core, so the shader's path and palette can't drift from the CPU side.
@@ -587,6 +606,23 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
 }
 
 /// The ground under a pane and PANE_REACH past it: where the world must have something.
+/// A pane's cloud map, over its ground footprint (as far out as the world, PANE_REACH): its size and
+/// the Globals rows taking world xz to its uv (rows 0, 1) and its uv back (2, 3).
+fn cloud_map(pane: Pane, art: (u32, u32)) -> ((u32, u32), [[f32; 4]; 4]) {
+    let half = pane.half(art) + Vec2::splat(PANE_REACH);
+    let size = (2.0 * half / CLOUD_TEXEL).ceil().as_uvec2();
+    let ground = |sx, sy| {
+        let p = camera::ground_at(pane.centre + half * Vec2::new(sx, sy));
+        Vec2::new(p.x, p.z)
+    };
+    let origin = ground(-1.0, 1.0); // uv (0, 0) is the top left
+    let (u, v) = (ground(1.0, 1.0) - origin, ground(-1.0, -1.0) - origin);
+    let inv = Mat2::from_cols(u, v).inverse();
+    let (ru, rv) = (inv.row(0), inv.row(1));
+    let rows = [[ru.x, ru.y, -ru.dot(origin), 0.0], [rv.x, rv.y, -rv.dot(origin), 0.0], [origin.x, origin.y, u.x, u.y], [v.x, v.y, 0.0, 0.0]];
+    ((size.x, size.y), rows)
+}
+
 fn footprint(pane: Pane, art: (u32, u32)) -> [[f64; 2]; 4] {
     let half = pane.half(art) + Vec2::splat(PANE_REACH);
     [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(sx, sy)| {
@@ -643,16 +679,14 @@ impl Renderer {
             label: Some("globals"),
             entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
         });
-        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shadow map"),
+        let sampler_entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(ty), count: None };
+        let scene_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow and cloud maps"),
             entries: &[
                 texture_entry(0, wgpu::TextureSampleType::Depth),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
+                sampler_entry(1, wgpu::SamplerBindingType::Comparison),
+                texture_entry(2, wgpu::TextureSampleType::Float { filterable: true }),
+                sampler_entry(3, wgpu::SamplerBindingType::Filtering),
             ],
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -674,18 +708,17 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
-        let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow map"),
-            layout: &shadow_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-            ],
+        let cloud_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("clouds"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
 
         let common = include_str!("shaders/common.wgsl");
         let prelude = prelude();
         let shadow_module = shader(device, "shadow", &[common, include_str!("shaders/shadow.wgsl")]);
+        let cloud_module = shader(device, "clouds", &[common, include_str!("shaders/clouds.wgsl")]);
         let scene_module = shader(device, "scene", &[common, &prelude, include_str!("shaders/scene.wgsl")]);
         let post_module = shader(device, "post", &[include_str!("shaders/post.wgsl")]);
 
@@ -704,7 +737,23 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let scene_layout = pipeline_layout("scene", &[Some(&globals_layout), Some(&shadow_layout)]);
+        let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clouds"),
+            layout: Some(&pipeline_layout("clouds", &[Some(&globals_layout)])),
+            vertex: wgpu::VertexState { module: &cloud_module, entry_point: Some("vs_clouds"), compilation_options: Default::default(), buffers: &[] },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &cloud_module,
+                entry_point: Some("fs_clouds"),
+                compilation_options: Default::default(),
+                targets: &[Some(CLOUD_FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let scene_layout = pipeline_layout("scene", &[Some(&globals_layout), Some(&scene_bind_layout)]);
         let toon_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_toon"), &BUFFERS, Some(wgpu::Face::Back));
         let ground_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_ground"), &BUFFERS, Some(wgpu::Face::Back));
         let water_pipeline = scene_pipeline(device, &scene_layout, &scene_module, ("vs_scene", "fs_water"), &BUFFERS, Some(wgpu::Face::Back));
@@ -731,6 +780,7 @@ impl Renderer {
             cache: None,
         });
 
+        let binds = Binds { post_layout, scene_layout: scene_bind_layout, shadow_view, shadow_sampler, cloud_sampler };
         let ground = linear(HEMI_GROUND.0) * HEMI_GROUND.1;
         // The time-of-day fields are set by set_sky, before every upload.
         let globals = Globals {
@@ -787,7 +837,7 @@ impl Renderer {
                 // A little taller than now, so a new pixel size (which moves the art grid by less
                 // than an art pixel) still finds its rows.
                 let grass = Grass::new(device, &all_blades, pane, pane.half(art).y + 4.0 * pane.unit);
-                View { offset: sc.offset, art, pane, globals_group, targets: Self::targets(device, &post_layout, &post_buf, art), globals_buf, post_buf, grass }
+                View { offset: sc.offset, art, pane, globals_group, targets: Self::targets(device, &binds, &post_buf, art, pane), globals_buf, post_buf, grass }
             })
             .collect();
         drop(all_blades);
@@ -795,16 +845,15 @@ impl Renderer {
             globals,
             sun: Vec3::Y,
             background: Vec3::ZERO,
-            shadow_view,
-            shadow_group,
+            binds,
             shadow_pipeline,
+            cloud_pipeline,
             toon_pipeline,
             ground_pipeline,
             water_pipeline,
             insect_pipeline,
             grass_pipeline,
             post_pipeline,
-            post_layout,
             manual_srgb: !surface_format.is_srgb(),
             draws: build_draws(device, &world_layout, &flowers, &outer, &tiles),
             views,
@@ -830,16 +879,17 @@ impl Renderer {
             post_rain: [0.0; 4],
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
+            timer: None,
         }
     }
 
-    fn targets(device: &wgpu::Device, post_layout: &wgpu::BindGroupLayout, post_buf: &wgpu::Buffer, art: (u32, u32)) -> Targets {
+    fn targets(device: &wgpu::Device, binds: &Binds, post_buf: &wgpu::Buffer, art: (u32, u32), pane: Pane) -> Targets {
         let color = texture(device, "colour", art, COLOR_FORMAT);
         let normal = texture(device, "normals", art, NORMAL_FORMAT);
         let depth = texture(device, "depth", art, DEPTH_FORMAT);
         let post = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post"),
-            layout: post_layout,
+            layout: &binds.post_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&normal) },
@@ -847,7 +897,19 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: post_buf.as_entire_binding() },
             ],
         });
-        Targets { color, normal, depth, post }
+        let (size, cloud_map) = cloud_map(pane, art);
+        let clouds = texture(device, "cloud map", size, CLOUD_FORMAT);
+        let scene = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow and cloud maps"),
+            layout: &binds.scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&binds.shadow_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&binds.shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&clouds) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&binds.cloud_sampler) },
+            ],
+        });
+        Targets { color, normal, depth, post, clouds, cloud_map, scene }
     }
 
     /// This frame's time of day: lights, shadow camera, water tint, ground fog and the sky colour.
@@ -878,7 +940,7 @@ impl Renderer {
         let view = &mut self.views[i];
         view.art = art_size(width, height, self.pixel_size);
         view.pane = Pane::new(view.art, view.offset, primary_art, self.pixel_size);
-        view.targets = Self::targets(device, &self.post_layout, &view.post_buf, view.art);
+        view.targets = Self::targets(device, &self.binds, &view.post_buf, view.art, view.pane);
         view.grass.set_view(view.pane, view.art);
         let params = PostParams { art: [view.art.0, view.art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain };
         queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
@@ -972,17 +1034,19 @@ impl Renderer {
     }
 
     /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),
-    /// scene and post.
-    pub fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, out: &wgpu::TextureView) {
+    /// cloud map, scene and post.
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, out: &wgpu::TextureView) {
         let view = &self.views[i];
         let globals = Globals {
             view_proj: (camera::projection(view.art, view.pane) * camera::view()).to_cols_array_2d(),
             light_view_proj: camera::light_view_proj(self.sun, view.pane.ground_centre()).to_cols_array_2d(),
+            cloud_map: view.targets.cloud_map,
             ..self.globals
         };
         queue.write_buffer(&view.globals_buf, 0, bytemuck::bytes_of(&globals));
         queue.write_buffer(&view.post_buf, std::mem::offset_of!(PostParams, rain) as u64, bytemuck::bytes_of(&self.post_rain));
         let mut encoder = device.create_command_encoder(&Default::default());
+        let timer = self.timer.as_ref().filter(|_| i == 0);
         let depth_attachment = |view| {
             Some(wgpu::RenderPassDepthStencilAttachment {
                 view,
@@ -1012,8 +1076,8 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
                 color_attachments: &[],
-                depth_stencil_attachment: depth_attachment(&self.shadow_view),
-                timestamp_writes: None,
+                depth_stencil_attachment: depth_attachment(&self.binds.shadow_view),
+                timestamp_writes: timer.and_then(|t| t.writes(0)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1021,6 +1085,22 @@ impl Renderer {
             pass.set_bind_group(0, &view.globals_group, &[]);
             for d in self.draws.iter().chain(&self.post_clock.draws).chain([&self.frog_draw]).filter(|d| d.casts_shadow) {
                 draw(&mut pass, d);
+            }
+        }
+        {
+            // Cleared only, without clouds: the scene doesn't read it then.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clouds"),
+                color_attachments: &[color_attachment(&view.targets.clouds, Vec4::ZERO)],
+                depth_stencil_attachment: None,
+                timestamp_writes: timer.and_then(|t| t.writes(1)),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if self.globals.params[2] > 0.0 {
+                pass.set_pipeline(&self.cloud_pipeline);
+                pass.set_bind_group(0, &view.globals_group, &[]);
+                pass.draw(0..3, 0..1);
             }
         }
         {
@@ -1033,12 +1113,12 @@ impl Renderer {
                     color_attachment(&view.targets.normal, up.extend(1.0)),
                 ],
                 depth_stencil_attachment: depth_attachment(&view.targets.depth),
-                timestamp_writes: None,
+                timestamp_writes: timer.and_then(|t| t.writes(2)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &view.globals_group, &[]);
-            pass.set_bind_group(1, &self.shadow_group, &[]);
+            pass.set_bind_group(1, &view.targets.scene, &[]);
             let insects = [&self.frog_draw, &self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
             for d in self.draws.iter().chain(&self.post_clock.draws).chain(insects) {
                 pass.set_pipeline(match d.shade {
@@ -1062,7 +1142,7 @@ impl Renderer {
                 label: Some("post"),
                 color_attachments: &[color_attachment(out, Vec4::ZERO)],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: timer.and_then(|t| t.writes(3)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1070,7 +1150,13 @@ impl Renderer {
             pass.set_bind_group(0, &view.targets.post, &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(t) = timer {
+            t.resolve(&mut encoder);
+        }
         queue.submit([encoder.finish()]);
+        if let Some(t) = self.timer.as_mut().filter(|_| i == 0) {
+            t.submitted(device);
+        }
     }
 }
 
@@ -1079,11 +1165,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloud_map_rows_take_the_panes_ground_to_its_uv_and_back() {
+        let art = (640, 360);
+        for (pane, art) in [(Pane::new(art, (0, 0), art, 3), art), (Pane::new(art, (339, 1080), (854, 480), 3), art)] {
+            let (size, rows) = cloud_map(pane, art);
+            assert!(size.0 > 150 && size.0 < 300 && size.1 > 100 && size.1 < 200, "{size:?}"); // a texel every few art px
+            let to_uv = |xz: Vec2| Vec2::new(Vec3::from_slice(&rows[0][..3]).dot(xz.extend(1.0)), Vec3::from_slice(&rows[1][..3]).dot(xz.extend(1.0)));
+            let from_uv = |uv: Vec2| Vec2::new(rows[2][0], rows[2][1]) + uv.x * Vec2::new(rows[2][2], rows[2][3]) + uv.y * Vec2::new(rows[3][0], rows[3][1]);
+            // The pane's own corners land inside the map, its centre in the middle.
+            let half = pane.half(art);
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
+                let g = camera::ground_at(pane.centre + half * Vec2::new(sx, sy));
+                let uv = to_uv(Vec2::new(g.x, g.z));
+                assert!(uv.cmpgt(Vec2::ZERO).all() && uv.cmplt(Vec2::ONE).all(), "corner {sx},{sy}: {uv}");
+                assert!(from_uv(uv).abs_diff_eq(Vec2::new(g.x, g.z), 1e-3));
+                if sx == 0.0 {
+                    assert!(uv.abs_diff_eq(Vec2::splat(0.5), 1e-4), "{uv}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shaders_validate() {
         let common = include_str!("shaders/common.wgsl");
         let prelude = prelude();
         for (name, src) in [
             ("shadow", [common, include_str!("shaders/shadow.wgsl")].concat()),
+            ("clouds", [common, include_str!("shaders/clouds.wgsl")].concat()),
             ("scene", [common, &prelude, include_str!("shaders/scene.wgsl")].concat()),
             ("post", include_str!("shaders/post.wgsl").to_string()),
         ] {
@@ -1119,6 +1228,6 @@ mod tests {
             })
             .expect("Globals in common.wgsl");
         assert_eq!(span as usize, size_of::<Globals>());
-        assert_eq!(size_of::<Globals>(), 352, "three mat4 and ten vec4");
+        assert_eq!(size_of::<Globals>(), 416, "three mat4 and fourteen vec4");
     }
 }

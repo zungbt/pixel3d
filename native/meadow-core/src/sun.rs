@@ -4,7 +4,7 @@
 //! anywhere.
 use std::f64::consts::PI;
 
-use libm::{acos, cos, sin};
+use libm::{acos, asin, atan2, cos, sin, tan};
 
 // IANA zone → (lat, lon), as the web's table.
 const ZONES: &[(&str, f64, f64)] = &[
@@ -88,14 +88,32 @@ pub fn zone_place(zone: Option<&str>, utc_offset_min: i32) -> (f64, f64) {
 /// daylight, so the sky keeps a sunrise and a sunset. `utc_offset_min` is east-positive (+420 for
 /// UTC+7): the opposite sign of the web's `getTimezoneOffset()`.
 pub fn sun_times(date: Date, utc_offset_min: i32, (lat, lon): (f64, f64)) -> SunTimes {
-    let n = day_of_year(date) as f64;
-    let g = 2.0 * PI / 365.0 * (n - 1.0);
-    let decl = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g) - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g);
-    let eq_time = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    let (decl, eq_time) = declination_and_eq_time(day_of_year(date) as f64 - 1.0);
     let cos_h = (cos(90.833 * RAD) - sin(lat * RAD) * sin(decl)) / (cos(lat * RAD) * cos(decl));
     let half = (acos(cos_h.clamp(-1.0, 1.0)) / RAD / 15.0).clamp(0.5, 11.5); // hours
     let noon = 12.0 - eq_time / 60.0 - lon / 15.0 + utc_offset_min as f64 / 60.0;
     SunTimes { rise: (noon - half).rem_euclid(24.0), set: (noon + half).rem_euclid(24.0) }
+}
+
+/// NOAA's fractional-year series: the sun's declination (radians) and the equation of time
+/// (minutes), `days` into the year.
+fn declination_and_eq_time(days: f64) -> (f64, f64) {
+    let g = 2.0 * PI / 365.0 * days;
+    let decl = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g) - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g);
+    let eq_time = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    (decl, eq_time)
+}
+
+/// Where the sun stands at local clock `hour` (NOAA, no refraction): (elevation, azimuth) in
+/// radians, the azimuth clockwise from north. `utc_offset_min` as sun_times.
+pub fn sun_position(date: Date, hour: f64, utc_offset_min: i32, (lat, lon): (f64, f64)) -> (f64, f64) {
+    let (decl, eq_time) = declination_and_eq_time(day_of_year(date) as f64 - 1.0 + (hour - 12.0) / 24.0);
+    let solar_min = hour * 60.0 + eq_time + 4.0 * lon - utc_offset_min as f64;
+    let ha = (solar_min / 4.0 - 180.0) * RAD; // hour angle: 0 at solar noon, west positive
+    let lat = lat * RAD;
+    let elevation = asin((sin(lat) * sin(decl) + cos(lat) * cos(decl) * cos(ha)).clamp(-1.0, 1.0));
+    let azimuth = (atan2(sin(ha), cos(ha) * sin(lat) - tan(decl) * cos(lat)) + PI).rem_euclid(2.0 * PI);
+    (elevation, azimuth)
 }
 
 /// 0 in midsummer, 1 in midwinter (the fog season), flipped south of the equator.
@@ -156,6 +174,34 @@ mod tests {
             let s = sun_times(OCT7, offset, zone_place(None, offset));
             assert!((s.rise - 6.0).abs() < 0.3 && (s.set - 18.0).abs() < 0.3, "offset {offset}: {s:?}");
         }
+    }
+
+    #[test]
+    fn the_sun_stands_where_it_should_over_da_nang_and_the_equator() {
+        let da_nang = (16.07, 108.22);
+        let deg = |(e, a): (f64, f64)| (e / RAD, a / RAD);
+        let noon = |date| {
+            let s = sun_times(date, 420, da_nang);
+            (s.rise + s.set) / 2.0
+        };
+        // Solar noon: 90 - |lat - declination| high, due south in winter, north at midsummer.
+        let (e, a) = deg(sun_position(DEC21, noon(DEC21), 420, da_nang));
+        assert!((e - 50.5).abs() < 0.5 && (a - 180.0).abs() < 2.0, "dec 21 noon: {e} {a}");
+        let (e, a) = deg(sun_position(JUNE21, noon(JUNE21), 420, da_nang));
+        assert!((e - 82.6).abs() < 0.5 && (a.min(360.0 - a)) < 2.0, "june 21 noon: {e} {a}");
+        // Rising in the east-north-east at midsummer, the east-south-east at midwinter, and on the
+        // horizon at sunrise (sun_times counts the refraction, so a hair below).
+        for (date, east_of) in [(JUNE21, 50.0..80.0), (DEC21, 105.0..130.0)] {
+            let rise = sun_times(date, 420, da_nang).rise;
+            let (e, a) = deg(sun_position(date, rise, 420, da_nang));
+            assert!((-1.2..0.2).contains(&e) && east_of.contains(&a), "{date:?} sunrise: {e} {a}");
+            let (_, a) = deg(sun_position(date, noon(date) + 3.0, 420, da_nang));
+            assert!((190.0..350.0).contains(&a), "{date:?} afternoon: west, got {a}");
+        }
+        // The equinox at the equator on Greenwich: straight up at noon, below at midnight.
+        let march20 = Date { year: 2026, month: 3, day: 20 };
+        assert!(deg(sun_position(march20, 12.1, 0, (0.0, 0.0))).0 > 88.5);
+        assert!(deg(sun_position(march20, 0.1, 0, (0.0, 0.0))).0 < -85.0);
     }
 
     #[test]

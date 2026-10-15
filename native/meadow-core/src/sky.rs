@@ -1,7 +1,7 @@
 //! Time of day, ported 1:1 from the web's `src/sky.js`. One directional light is the sun by day
 //! and the moon by night; the sky, ambient and fog colours follow the sun's elevation. Colours are
 //! linear rgb, lerped in linear (three.js Colors are linear under its colour management).
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
 use libm::{cos, pow, sin};
 
@@ -95,12 +95,33 @@ pub struct SkyState {
 
 /// The web's `update(t, dayT, fog)` for `fog.mode = 'auto'`; other modes: set `fog` with fog_amount.
 pub fn sky_state(day_t: f64, winter: f64) -> SkyState {
-    let phase = (day_t / DAY_LENGTH + DAY_START) % 1.0;
     let angle = (day_t / DAY_LENGTH + DAY_START) * PI * 2.0;
     let elevation = sin(angle);
-    let is_day = elevation >= 0.0;
-    let dir = if is_day { 1.0 } else { -1.0 };
+    let dir = if elevation >= 0.0 { 1.0 } else { -1.0 };
     let sun_pos = [cos(angle) * SUN_DIST * dir, elevation.abs() * SUN_DIST, SUN_DIST * 0.36];
+    lit(phase(day_t), elevation, sun_pos, winter)
+}
+
+/// The sky phase (0 -> 0.5 day) a day_t shows.
+pub fn phase(day_t: f64) -> f64 {
+    (day_t / DAY_LENGTH + DAY_START) % 1.0
+}
+
+/// The sky with the sun where it really stands: `elevation` and `azimuth` (radians, clockwise from
+/// north) as sun::sun_position. North is the top of the screen (the camera looks down -x -z),
+/// east its right. The moon stands across the sky from the sun, as high as the sun is low.
+pub fn sky_at(phase: f64, elevation: f64, azimuth: f64, winter: f64) -> SkyState {
+    const NORTH: [f64; 2] = [-FRAC_1_SQRT_2, -FRAC_1_SQRT_2]; // world xz
+    const EAST: [f64; 2] = [FRAC_1_SQRT_2, -FRAC_1_SQRT_2];
+    let (up, flat) = (sin(elevation), cos(elevation) * SUN_DIST);
+    let k = if up >= 0.0 { flat } else { -flat };
+    let (e, n) = (sin(azimuth) * k, cos(azimuth) * k);
+    lit(phase, up, [e * EAST[0] + n * NORTH[0], up.abs() * SUN_DIST, e * EAST[1] + n * NORTH[1]], winter)
+}
+
+/// Lights and colours for the sun at `elevation` (its sine) with the light at `sun_pos`.
+fn lit(phase: f64, elevation: f64, sun_pos: [f64; 3], winter: f64) -> SkyState {
+    let is_day = elevation >= 0.0;
     // Light fades to 0 at the horizon, so swapping sun <-> moon there doesn't pop.
     let fade = smoothstep(elevation.abs(), 0.0, 0.2);
     let sun_color = if is_day {
@@ -176,6 +197,21 @@ mod tests {
         assert_eq!(fog_amount(Fog::Auto, 1.0, 1.0), 0.0, "none at noon");
         assert_eq!(fog_amount(Fog::Auto, -0.5, 1.0), 1.0, "full on a winter night");
         assert!(fog_amount(Fog::Auto, -0.5, 0.0) < 0.5, "thin on a summer night");
+    }
+
+    #[test]
+    fn the_real_sun_shines_from_its_compass_point() {
+        // Noon in the south: the light sits toward the viewer (+x +z), high up.
+        let noon = sky_at(0.25, 60f64.to_radians(), PI, 0.0);
+        let [x, y, z] = noon.sun_pos;
+        assert!(x > 0.0 && (x - z).abs() < 1e-9 && y > 32.0 && noon.sun_color[0] > 1.0, "{:?}", noon.sun_pos);
+        // Morning in the east: the screen's right (+x -z).
+        let [x, _, z] = sky_at(0.1, 20f64.to_radians(), PI / 2.0, 0.0).sun_pos;
+        assert!(x > 0.0 && (x + z).abs() < 1e-9);
+        // Night: the moon across the sky, the sun's colour gone.
+        let night = sky_at(0.75, -50f64.to_radians(), PI, 0.0);
+        let [x, y, _] = night.sun_pos;
+        assert!(x < 0.0 && y > 29.0 && night.daylight == 0.0);
     }
 
     #[test]

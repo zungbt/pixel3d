@@ -2,6 +2,8 @@
 
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
+@group(1) @binding(2) var cloud_map: texture_2d<f32>;
+@group(1) @binding(3) var cloud_sampler: sampler;
 
 struct VertexOut {
     @builtin(position) clip: vec4f,
@@ -84,6 +86,20 @@ fn shadow(world: vec3f, normal: vec3f) -> f32 {
     lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv - vec2f(0.0, texel), depth);
     let inside = all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0)) && depth <= 1.0;
     return select(1.0, lit / 5.0, inside);
+}
+
+// 1 in sunlight, down to 0.35 under a thick cloud. The cloud map holds cloud_depth a few art
+// pixels apart; it's sampled bilinear and stepped here, so the edges stay as sharp as if computed
+// per pixel.
+fn cloud_shade(world: vec3f) -> f32 {
+    let cover = g.params.z;
+    if cover <= 0.0 {
+        return 1.0;
+    }
+    let p = vec3f(world.xz, 1.0);
+    let s = textureSampleLevel(cloud_map, cloud_sampler, vec2f(dot(g.cloud_u.xyz, p), dot(g.cloud_v.xyz, p)), 0.0).r;
+    let dim = mix(0.55, 0.35, cover);
+    return 1.0 - (1.0 - dim) * (0.35 * step(0.0, s) + 0.35 * step(0.8, s) + 0.3 * step(1.6, s));
 }
 
 // Sun (or moon) through the toon ramp, shadow and cloud shade, plus the sky/ground hemisphere light
