@@ -4,7 +4,7 @@
 //! anywhere.
 use std::f64::consts::PI;
 
-use libm::{acos, asin, atan2, cos, sin, tan};
+use libm::{acos, asin, atan2, cos, sin, sqrt, tan};
 
 // IANA zone → (lat, lon), as the web's table.
 const ZONES: &[(&str, f64, f64)] = &[
@@ -138,6 +138,35 @@ pub fn parse_place(settings: &str) -> Result<Option<(f64, f64)>, String> {
     Ok(Some((lat, lon)))
 }
 
+const EARTH_KM: f64 = 6371.0;
+
+fn unit_vector((lat, lon): (f64, f64)) -> [f64; 3] {
+    let (lat, lon) = (lat * RAD, lon * RAD);
+    [cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)]
+}
+
+/// The point `f` (0-1) of the way from `a` to `b` along the great circle (the "as the crow flies"
+/// path), (lat, lon) in degrees. The same place and antipodes have no unique path: `b`.
+pub fn great_circle(a: (f64, f64), b: (f64, f64), f: f64) -> (f64, f64) {
+    let (u, v) = (unit_vector(a), unit_vector(b));
+    let omega = acos((u[0] * v[0] + u[1] * v[1] + u[2] * v[2]).clamp(-1.0, 1.0));
+    if omega < 1e-9 || PI - omega < 1e-6 {
+        return b;
+    }
+    let (wa, wb) = (sin((1.0 - f) * omega) / sin(omega), sin(f * omega) / sin(omega));
+    let p = [wa * u[0] + wb * v[0], wa * u[1] + wb * v[1], wa * u[2] + wb * v[2]];
+    (asin(p[2].clamp(-1.0, 1.0)) / RAD, atan2(p[1], p[0]) / RAD)
+}
+
+/// How far (km) and which way (radians clockwise from north, at `a`) it is from `a` to `b`.
+pub fn step(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (p1, p2, dl) = (a.0 * RAD, b.0 * RAD, (b.1 - a.1) * RAD);
+    let hav = sin((p2 - p1) / 2.0).powi(2) + cos(p1) * cos(p2) * sin(dl / 2.0).powi(2);
+    let km = 2.0 * EARTH_KM * asin(sqrt(hav).min(1.0));
+    let bearing = atan2(sin(dl) * cos(p2), cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl));
+    (km, bearing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +253,44 @@ mod tests {
         for bad in ["place = 21.03", "place = hanoi", "place = 91, 0", "place = 0, 181", "place = NaN, 0", "place = 21.03, 105.85, 3", "place ="] {
             assert!(parse_place(bad).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn the_great_circle_runs_from_a_to_b_the_short_way() {
+        let (saigon, london) = ((10.8, 106.7), (51.5, -0.13));
+        let near = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).abs() < 1e-6 && (p.1 - q.1).abs() < 1e-6;
+        assert!(near(great_circle(saigon, london, 0.0), saigon));
+        assert!(near(great_circle(saigon, london, 1.0), london));
+        // On the equator, halfway from 0° to 90°E is 45°E.
+        let m = great_circle((0.0, 0.0), (0.0, 90.0), 0.5);
+        assert!(m.0.abs() < 1e-9 && (m.1 - 45.0).abs() < 1e-9, "{m:?}");
+        // Across the date line the short way goes through 180°, not 0°.
+        let m = great_circle((0.0, 170.0), (0.0, -170.0), 0.5);
+        assert!((m.1.abs() - 180.0).abs() < 1e-9, "{m:?}");
+        // Half the parameter is half the distance.
+        let (total, _) = step(saigon, london);
+        let (half, _) = step(saigon, great_circle(saigon, london, 0.5));
+        assert!((half - total / 2.0).abs() < 0.5, "{half} of {total}");
+    }
+
+    #[test]
+    fn a_trip_without_a_unique_path_snaps_to_the_end_and_stays_finite() {
+        let saigon = (10.8, 106.7);
+        assert_eq!(great_circle(saigon, saigon, 0.3), saigon, "same place");
+        assert_eq!(great_circle((0.0, 0.0), (0.0, 180.0), 0.3), (0.0, 180.0), "antipodes");
+        // Over the pole: 80°N 0° to 80°N 180° passes through 90°N.
+        let m = great_circle((80.0, 0.0), (80.0, 180.0), 0.5);
+        assert!(m.0.is_finite() && m.1.is_finite() && (m.0 - 90.0).abs() < 1e-6, "{m:?}");
+    }
+
+    #[test]
+    fn step_gives_km_and_a_bearing_clockwise_from_north() {
+        let (km, b) = step((0.0, 0.0), (0.0, 90.0));
+        assert!((km - 10007.5).abs() < 5.0 && (b - PI / 2.0).abs() < 1e-9, "due east: {km} {b}");
+        let (km, b) = step((0.0, 0.0), (10.0, 0.0));
+        assert!((km - 1111.9).abs() < 1.0 && b.abs() < 1e-9, "due north: {km} {b}");
+        let (_, b) = step((0.0, 0.0), (-10.0, 0.0));
+        assert!((b.abs() - PI).abs() < 1e-9, "due south: {b}");
+        assert_eq!(step((5.0, 5.0), (5.0, 5.0)), (0.0, 0.0), "same place: no distance, no NaN");
     }
 }
