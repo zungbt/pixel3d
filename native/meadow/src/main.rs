@@ -154,6 +154,7 @@ impl App {
         #[cfg(not(windows))]
         let weather = None;
         let sky = self.sky.state(time, weather.as_ref());
+        let slide = self.sky.advance(time);
         let clock = ClockPose {
             hands: self.sky.hands(wreck.behind(unix)),
             fallen: wreck.progress(),
@@ -161,6 +162,7 @@ impl App {
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
+        scene.renderer.slide_clouds(slide);
         scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock, weather.as_ref());
         for (i, frame) in frames {
             let view = frame.0.texture.create_view(&Default::default());
@@ -330,7 +332,7 @@ impl App {
     #[cfg(windows)]
     fn choose_city(&mut self, city: meadow_core::weather::City) {
         log::info!("city: {}, {} ({:.4}, {:.4})", city.name, city.detail, city.lat, city.lon);
-        self.sky.set_place((city.lat, city.lon));
+        self.sky.set_place((city.lat, city.lon), self.time);
         self.weather.set_place((city.lat, city.lon));
         if let Some(desktop) = self.desktop.as_ref() {
             desktop.set_city(&city.name);
