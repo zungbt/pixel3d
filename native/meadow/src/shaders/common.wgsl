@@ -14,6 +14,10 @@ struct Globals {
     clouds: vec4f,      // xy: the clouds' drift (world units), zw: unused
     wind: vec4f,        // xy: where the grass leans, z: the gusts' phase (s), w: their strength
     rain: vec4f,        // x: how hard it's raining, y: how wet the meadow is (0-1)
+    cloud_u: vec4f,     // this view's cloud map: u = dot(xyz, (world x, z, 1))
+    cloud_v: vec4f,     // and v
+    cloud_origin: vec4f, // xy: the map's uv (0, 0) in world xz, zw: its u axis (xz across u 0..1)
+    cloud_axis_v: vec4f, // xy: its v axis
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -116,24 +120,21 @@ fn gradient_noise(p: vec3f) -> f32 {
 // upper wind (the CPU's Clouds), each a few overlapping puffs (a lobed outline), 25-80 m across
 // and many small, forming and melting away over 10-30 minutes; with more cover they swell and
 // merge. Their soft edges (the sun's disc from that high) in pixel-art steps over some 4 m. They
-// only dim direct light.
-fn cloud_shade(world: vec3f) -> f32 {
+// only dim direct light. How far inside a cloud's shadow ground point `xz` is (world units,
+// negative outside): drawn into each view's cloud map, which scene.wgsl's cloud_shade steps.
+fn cloud_depth(xz: vec2f) -> f32 {
     let cover = g.params.z;
-    if cover <= 0.0 {
-        return 1.0;
-    }
     let t = g.params.x;
     let flat = g.sun_dir.xz;
     let reach = 240.0 * min(length(flat) / max(g.sun_dir.y, 0.05), 3.0); // world units
-    let p = world.xz - g.clouds.xy + flat / max(length(flat), 1e-4) * reach;
+    let p = xz - g.clouds.xy + flat / max(length(flat), 1e-4) * reach;
     let m = t / 1200.0;
     var s = max(cloud_cells(p, t, 28.0, 0.6, 1.0, 0), cloud_cells(p, t, 12.0, 0.35, 0.3, 1));
     s += 2.4 * gradient_noise(vec3f(p * 0.175, m)) + 1.0 * gradient_noise(vec3f(p.x * 0.45 + 3.0, p.y * 0.45, m));
     // Swollen with the cover so about that share of the ground is shaded (fitted to the field's spread).
     let c = max(cover, 0.01);
     s += 2.0 * (1.252 + 1.588 * c + 1.269 * log(c) + 1.623 * c * c * c * c);
-    let dim = mix(0.55, 0.35, cover);
-    return 1.0 - (1.0 - dim) * (0.35 * step(0.0, s) + 0.35 * step(0.8, s) + 0.3 * step(1.6, s));
+    return s;
 }
 
 // How far inside the nearest cloud of a layer `p` is (world units, negative outside): one cloud
@@ -170,6 +171,9 @@ fn cloud_cells(p: vec2f, t: f32, size: f32, reach: f32, share: f32, layer: i32) 
 // Low fog by absolute height, thinning upward: hollows and the pond fill first, the crowns get a
 // light haze; drifting patches.
 fn ground_fog(world: vec3f) -> f32 {
+    if g.fog.a <= 0.0 {
+        return 0.0;
+    }
     let t = g.params.x;
     let layer = exp(-0.5 * max(world.y, 0.0));
     let p = world.xz * 0.18 + vec2f(t * 0.04, t * 0.015);
