@@ -7,9 +7,10 @@
 // wind, fetched from Open-Meteo every half hour.
 // Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
 // --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
-// local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
-// --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
-// WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams).
+// local hour H, 0-24, e.g. 18.5), --date MM-DD (that day's sun path, this year), --cycle (the
+// 300 s day, from --hour or the clock), --toggle-clock S (break and mend the post clock every S
+// seconds, not saved), --screens WxH+X+Y,... (windowed: a window per listed monitor, the first
+// the primary, to check the seams).
 // Backend: Vulkan; override with WGPU_BACKEND=dx12. Release builds have no console: they log to
 // %APPDATA%\pixel3d\log.txt.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -474,6 +475,15 @@ fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
+/// "MM-DD" for --date; days up to the month's length in a leap year.
+fn parse_date(v: &str) -> Option<(u8, u8)> {
+    let (m, d) = v.split_once('-')?;
+    let (m, d): (u8, u8) = (m.parse().ok()?, d.parse().ok()?);
+    const DAYS: [u8; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    (1..=12).contains(&m).then_some(())?;
+    (1..=DAYS[m as usize - 1]).contains(&d).then_some((m, d))
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
@@ -551,6 +561,7 @@ fn main() {
     if !matches!(mode, sky_clock::Mode::Hour(_)) {
         settings.clock = mode == sky_clock::Mode::Clock;
     }
+    let date = arg(&args, "--date").map(|v| parse_date(&v).unwrap_or_else(|| panic!("--date must be MM-DD, like 12-21, got {v}")));
     let screens = arg(&args, "--screens").map(|v| parse_screens(&v).unwrap_or_else(|| panic!("--screens must be like 1280x720+0+0,960x540+170+720, got {v}")));
     let toggle_clock = arg(&args, "--toggle-clock").map(|v| v.parse().ok().filter(|s: &f64| *s > 0.0).unwrap_or_else(|| panic!("--toggle-clock must be seconds, like 8, got {v}")));
     log::info!("settings: {settings:?}");
@@ -565,7 +576,7 @@ fn main() {
     }
     let now = Instant::now();
     let mut app = App {
-        sky: sky_clock::SkyClock::new(mode, text.as_deref(), settings.fog),
+        sky: sky_clock::SkyClock::new(mode, date, text.as_deref(), settings.fog),
         // Off since `brokenAt` (or now, if that's missing).
         wreck: Wreck::new((!settings.show_clock).then(|| settings.broken_at.map_or_else(unix_now, |t| t as f64))),
         toggle_clock: toggle_clock.map(|every| (every, every)),

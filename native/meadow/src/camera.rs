@@ -69,11 +69,12 @@ pub fn projection(art: (u32, u32), pane: Pane) -> Mat4 {
 }
 
 /// The sun's (or moon's) shadow camera, as the web's: ±22 box, near/far 1..80, moved along with a
-/// pane to `centre` (the origin for the primary). The light's z is always 13.68
-/// (meadow_core::sky), so it never sits on the y axis and look_at with +Y is defined.
+/// pane to `centre` (the origin for the primary). Its up is +Y but for a sun all but overhead (the
+/// tropics' noon), where look_at with +Y breaks down.
 pub fn light_view_proj(sun: Vec3, centre: Vec3) -> Mat4 {
     let proj = orthographic(-SHADOW_HALF, SHADOW_HALF, -SHADOW_HALF, SHADOW_HALF, 1.0, 80.0);
-    proj * look_at_mat4(sun + centre, centre, Vec3::Y)
+    let up = if sun.normalize().y > 0.999 { Vec3::NEG_Z } else { Vec3::Y };
+    proj * look_at_mat4(sun + centre, centre, up)
 }
 
 #[cfg(test)]
@@ -135,12 +136,15 @@ mod tests {
         // depth must stay in 1..80, or the ground there would shadow or light wrongly.
         let corners = ground_corners();
         assert!(corners.iter().all(|c| (27.0..28.5).contains(&c.x.hypot(c.z))), "{corners:?}");
-        for day_t in 0..300 {
-            let p = sky::sky_state(day_t as f64, 0.0).sun_pos;
+        let web = (0..300).map(|day_t| sky::sky_state(day_t as f64, 0.0).sun_pos);
+        // The real sun from every compass point, straight overhead included.
+        let real = (0..=18).flat_map(|e| (0..24).map(move |a| sky::sky_at(0.2, (e as f64 * 10.0 - 90.0).to_radians(), (a as f64 * 15.0).to_radians(), 0.0).sun_pos));
+        for p in web.chain(real) {
             let light = light_view_proj(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32), Vec3::ZERO);
+            assert!(light.is_finite(), "light at {p:?}");
             for c in &corners {
                 let z = light.project_point3(*c).z;
-                assert!((0.05..0.95).contains(&z), "day_t {day_t}: corner {c} at shadow depth {z}");
+                assert!((0.05..0.95).contains(&z), "light at {p:?}: corner {c} at shadow depth {z}");
             }
         }
     }
