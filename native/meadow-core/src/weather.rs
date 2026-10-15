@@ -2,7 +2,7 @@
 //! cloud cover, wind, visibility and rain. Only the URLs and the parsing live here; the HTTP is the exe's.
 use std::f64::consts::FRAC_PI_2;
 
-use crate::world::smoothstep;
+use crate::world::{lerp, smoothstep};
 
 pub const SEARCH_HOST: &str = "geocoding-api.open-meteo.com";
 pub const FORECAST_HOST: &str = "api.open-meteo.com";
@@ -26,6 +26,20 @@ pub struct Weather {
 }
 
 impl Weather {
+    /// `a` fading into `b`, `f` 0-1: the numbers blend (the wind swinging the short way round) and
+    /// the report switches halfway.
+    pub fn mix(a: &Weather, b: &Weather, f: f64) -> Weather {
+        let swing = (b.wind_from - a.wind_from + 540.0).rem_euclid(360.0) - 180.0;
+        Weather {
+            cover: lerp(a.cover, b.cover, f),
+            wind_from: (a.wind_from + swing * f).rem_euclid(360.0),
+            wind_kmh: lerp(a.wind_kmh, b.wind_kmh, f),
+            gust_kmh: lerp(a.gust_kmh, b.gust_kmh, f),
+            visibility_m: lerp(a.visibility_m, b.visibility_m, f),
+            code: if f < 0.5 { a.code } else { b.code },
+        }
+    }
+
     /// The direction the wind blows toward in the scene's x, z: x east, z south (the sun rises
     /// at +x and stands at +z at noon), as an angle from +x.
     pub fn heading(&self) -> f64 {
@@ -327,6 +341,20 @@ pub(crate) mod tests {
         assert_eq!([0, 3, 45, 73].map(rain), [0.0; 4], "clear, cloudy, fog, snow");
         assert!(rain(51) < rain(61) && rain(61) < rain(63) && rain(63) < rain(65));
         assert!(Weather { code: 95, ..CLEAR }.storm() && !Weather { code: 65, ..CLEAR }.storm());
+    }
+
+    #[test]
+    fn one_weather_fades_into_another() {
+        let (a, b) = (Weather { cover: 0.2, wind_kmh: 10.0, visibility_m: 20000.0, code: 0, ..CLEAR }, Weather { cover: 0.8, wind_kmh: 30.0, visibility_m: 1000.0, code: 63, ..CLEAR });
+        assert_eq!(Weather::mix(&a, &b, 0.0), a);
+        assert_eq!(Weather::mix(&a, &b, 1.0), b);
+        let m = Weather::mix(&a, &b, 0.25);
+        assert!((m.cover - 0.35).abs() < 1e-12 && (m.wind_kmh - 15.0).abs() < 1e-12 && (m.visibility_m - 15250.0).abs() < 1e-9, "{m:?}");
+        assert_eq!((m.code, Weather::mix(&a, &b, 0.75).code), (0, 63), "the report switches halfway");
+        // The wind swings the short way round: 350° to 10° passes 0°, not 180°.
+        let swing = |f| Weather::mix(&Weather { wind_from: 350.0, ..CLEAR }, &Weather { wind_from: 10.0, ..CLEAR }, f).wind_from;
+        assert!((swing(0.5) - 0.0).abs() < 1e-9 || (swing(0.5) - 360.0).abs() < 1e-9, "{}", swing(0.5));
+        assert!(Weather::mix(&CLEAR, &CLEAR, 0.4).wind_from.is_finite());
     }
 
     #[test]
