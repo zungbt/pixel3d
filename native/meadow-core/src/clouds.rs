@@ -38,6 +38,12 @@ impl Clouds {
         self.drift[0] += cos(heading) * SPEED * pull * dt;
         self.drift[1] += sin(heading) * SPEED * pull * dt;
     }
+
+    /// The sky slid over the ground by `by` (world x, z): a trip between cities.
+    pub fn slide(&mut self, by: [f64; 2]) {
+        self.drift[0] += by[0];
+        self.drift[1] += by[1];
+    }
 }
 
 /// `sky` under `cover`: past OVERCAST.0 the sun fades behind the cloud (to 15% at full cover)
@@ -103,6 +109,13 @@ mod tests {
         assert!((0.1..0.5).contains(&cloudy), "cloudy {cloudy}");
         // Clear to cloudy takes five minutes or more.
         assert!(covers.windows(2).all(|w| (w[0] - w[1]).abs() < 0.2));
+    }
+
+    #[test]
+    fn sliding_moves_the_drift_by_exactly_that_much() {
+        let mut c = Clouds { drift: [1.0, 2.0] };
+        c.slide([0.5, -1.0]);
+        assert_eq!(c.drift, [1.5, 1.0]);
     }
 
     #[test]
