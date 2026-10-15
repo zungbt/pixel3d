@@ -8,7 +8,8 @@ use meadow_core::clock;
 use meadow_core::sky::{self, Fog, SkyState};
 use meadow_core::sun::{self, Date, SunTimes};
 use meadow_core::weather::Weather;
-use meadow_core::world::smoothstep;
+use meadow_core::settings;
+use meadow_core::world::{lerp, smoothstep};
 
 // A trip's length and its cloud slide grow with the distance and level off over long hauls: the
 // first 1000 km count most, and the far side of the world is not much longer than half of it.
@@ -36,6 +37,14 @@ struct Travel {
     cloud_per_km: f64, // world units the clouds slide per km the sky travels on this trip
 }
 
+/// The post clock's offset from UTC sliding from where it stood to the zone it now shows.
+#[derive(Clone, Copy)]
+struct Glide {
+    from_min: f64,
+    start: f64, // animation time
+    secs: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
     Clock,              // the PC's local time
@@ -49,6 +58,9 @@ pub struct SkyClock {
     place: (f64, f64),
     travel: Option<Travel>, // None once arrived
     shown: (f64, f64),      // where the sky was last drawn: a new trip starts here
+    city_tz: Option<TimeZone>, // the chosen city's own zone, if known
+    pub city_time: bool,       // the post clock shows that zone's time; false: the PC's
+    glide: Option<Glide>,
     cycle_start: f64, // cycle mode: day_t at animation time 0
     date: Option<(u8, u8)>, // --date: (month, day) pinned
     pub fog: Fog,
@@ -177,14 +189,17 @@ impl SkyClock {
             hhmm(today.rise),
             hhmm(today.set),
         );
-        Self { mode, tz, place, travel: None, shown: place, cycle_start, date, fog }
+        let city_tz = settings.and_then(settings::city_timezone).and_then(|name| TimeZone::get(name).ok());
+        Self { mode, tz, place, travel: None, shown: place, city_tz, city_time: false, glide: None, cycle_start, date, fog }
     }
 
     /// A city was chosen: the sky travels to it, from where it stands now, from animation time
     /// `now` for NEAR_SECS to FAR_SECS by the distance; the sun rises and sets there afterwards.
+    /// `timezone` is its IANA zone name ("" if unknown), for the post clock.
     #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
-    pub fn set_place(&mut self, place: (f64, f64), now: f64) {
+    pub fn set_place(&mut self, place: (f64, f64), timezone: &str, now: f64) {
         let (km, _) = sun::step(self.shown, place);
+        self.glide_clock(now, trip_secs(km), |sky| sky.city_tz = TimeZone::get(timezone).ok());
         let h = haul(km);
         let cloud_per_km = if km > 0.0 { h * FAR_SLIDE / km } else { 0.0 };
         self.travel = Some(Travel { from: self.shown, start: now, secs: trip_secs(km), cloud_per_km });
@@ -221,6 +236,31 @@ impl SkyClock {
         [east * sky::EAST[0] + north * sky::NORTH[0], east * sky::EAST[1] + north * sky::NORTH[1]]
     }
 
+    // Runs `change` and has the post clock's offset slide from where it stood to where it ends up.
+    fn glide_clock(&mut self, now: f64, secs: f64, change: impl FnOnce(&mut Self)) {
+        let from_min = self.hands_offset(Timestamp::now(), now);
+        change(self);
+        self.glide = Some(Glide { from_min, start: now, secs });
+    }
+
+    /// The post clock shows the chosen city's time (or the PC's): its hands slide there.
+    pub fn set_city_time(&mut self, on: bool, now: f64) {
+        self.glide_clock(now, NEAR_SECS, |sky| sky.city_time = on);
+    }
+
+    // The offset (minutes east of UTC) the post clock's hands show for `instant` at animation time `t`.
+    fn hands_offset(&self, instant: Timestamp, t: f64) -> f64 {
+        let zone = match (&self.city_tz, self.city_time) {
+            (Some(city), true) => city,
+            _ => &self.tz,
+        };
+        let live = zone.to_offset(instant).seconds() as f64 / 60.0;
+        match self.glide {
+            Some(Glide { from_min, start, secs }) => lerp(from_min, live, smoothstep(((t - start) / secs).clamp(0.0, 1.0), 0.0, 1.0)),
+            None => live,
+        }
+    }
+
     /// The local clock, or (false) the web's 300 s day carrying on from the time shown now.
     pub fn set_clock(&mut self, on: bool, anim_time: f64) {
         if on {
@@ -235,11 +275,13 @@ impl SkyClock {
         }
     }
 
-    /// The post clock's (hour, minute) hands: always the local time, whatever the sky shows, less
-    /// `behind` s (stopped, or still catching up).
-    pub fn hands(&self, behind: f64) -> (f64, f64) {
-        let (h, m, s) = at(&self.tz, Timestamp::now() - jiff::SignedDuration::from_secs_f64(behind)).hms;
-        clock::hand_angles(h, m, s)
+    /// The post clock's (hour, minute) hands: the PC's local time, or the chosen city's, whatever
+    /// the sky shows, less `behind` s (stopped, or still catching up); at animation time `t`.
+    pub fn hands(&self, behind: f64, t: f64) -> (f64, f64) {
+        let instant = Timestamp::now() - jiff::SignedDuration::from_secs_f64(behind);
+        let (h, m, s) = at(&TimeZone::UTC, instant).hms;
+        let day = (h as f64 * 3600.0 + m as f64 * 60.0 + s + self.hands_offset(instant, t) * 60.0).rem_euclid(86_400.0);
+        clock::hand_angles((day / 3600.0) as u32, (day % 3600.0 / 60.0) as u32, day % 60.0)
     }
 
     /// The sky for right now, the sun where it stands at the hour shown; `anim_time` (s) only
@@ -300,7 +342,7 @@ mod tests {
     #[test]
     fn a_new_city_is_reached_along_the_great_circle_in_the_trip_time() {
         let mut sky = sky_at("place = 0, 0\n");
-        sky.set_place((0.0, 90.0), 100.0);
+        sky.set_place((0.0, 90.0), "", 100.0);
         let secs = trip_secs(sun::step((0.0, 0.0), (0.0, 90.0)).0);
         let start = sky.place_at(100.0);
         assert!(start.0.abs() < 1e-6 && start.1.abs() < 1e-6, "starts where it was: {start:?}");
@@ -324,10 +366,10 @@ mod tests {
     #[test]
     fn a_second_city_chosen_mid_trip_starts_from_where_the_sky_was_drawn() {
         let mut sky = sky_at("place = 0, 0\n");
-        sky.set_place((0.0, 90.0), 0.0);
+        sky.set_place((0.0, 90.0), "", 0.0);
         let half = trip_secs(sun::step((0.0, 0.0), (0.0, 90.0)).0) / 2.0;
         sky.advance(half); // drawn at 45°E
-        sky.set_place((0.0, -90.0), half);
+        sky.set_place((0.0, -90.0), "", half);
         let p = sky.place_at(half);
         assert!((p.1 - 45.0).abs() < 1e-6, "no jump: {p:?}");
         let end = sky.place_at(half + trip_secs(sun::step((0.0, 45.0), (0.0, -90.0)).0));
@@ -339,7 +381,7 @@ mod tests {
         // The sun's own compass: north is the top of the screen, east its right (sky.rs).
         let slid = |to: (f64, f64)| {
             let mut sky = sky_at("place = 0, 0\n");
-            sky.set_place(to, 0.0);
+            sky.set_place(to, "", 0.0);
             let mut total = [0.0, 0.0];
             let secs = trip_secs(sun::step((0.0, 0.0), to).0);
             for k in 1..=60 {
@@ -364,15 +406,46 @@ mod tests {
     fn a_frame_at_an_unchanged_time_slides_nothing() {
         // An occluded app doesn't advance its animation time: the trip waits, then resumes.
         let mut sky = sky_at("place = 0, 0\n");
-        sky.set_place((0.0, 90.0), 0.0);
+        sky.set_place((0.0, 90.0), "", 0.0);
         sky.advance(2.0);
         assert_eq!(sky.advance(2.0), [0.0, 0.0]);
+    }
+
+    // The offset (minutes east of UTC) the post clock's hands show at 2026-10-15 09:30 UTC.
+    fn offset_at(sky: &SkyClock, t: f64) -> f64 {
+        sky.hands_offset("2026-10-15T09:30:00Z".parse().unwrap(), t)
+    }
+
+    #[test]
+    fn the_hands_follow_the_pc_zone_or_slide_to_the_chosen_citys() {
+        let mut sky = sky_at("place = 0, 0\n");
+        let pc = offset_at(&sky, 0.0);
+        sky.set_place((35.7, 139.7), "Asia/Tokyo", 10.0);
+        assert_eq!(offset_at(&sky, 10.0), pc, "the PC's time until asked for the city's");
+        sky.set_city_time(true, 20.0);
+        assert!((offset_at(&sky, 20.0) - pc).abs() < 1e-9, "starts where the hands were");
+        assert!((offset_at(&sky, 20.0 + NEAR_SECS / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway at half the time");
+        assert_eq!(offset_at(&sky, 20.0 + NEAR_SECS), 540.0, "Tokyo is UTC+9");
+        sky.set_city_time(false, 100.0);
+        assert!((offset_at(&sky, 100.0) - 540.0).abs() < 1e-9, "and back from where they stood");
+        assert_eq!(offset_at(&sky, 100.0 + NEAR_SECS), pc);
+    }
+
+    #[test]
+    fn an_unknown_city_zone_leaves_the_clock_on_the_pc() {
+        let mut sky = sky_at("place = 0, 0\n");
+        let pc = offset_at(&sky, 0.0);
+        sky.set_city_time(true, 0.0);
+        sky.set_place((35.7, 139.7), "", 1.0);
+        assert_eq!(offset_at(&sky, 1000.0), pc);
+        sky.set_place((35.7, 139.7), "Not/AZone", 2.0);
+        assert_eq!(offset_at(&sky, 1000.0), pc);
     }
 
     #[test]
     fn choosing_the_same_city_again_changes_nothing() {
         let mut sky = sky_at("place = 10.8, 106.7\n");
-        sky.set_place((10.8, 106.7), 5.0);
+        sky.set_place((10.8, 106.7), "", 5.0);
         assert_eq!(sky.advance(6.0), [0.0, 0.0]);
         assert_eq!(sky.place_at(6.0), (10.8, 106.7));
     }

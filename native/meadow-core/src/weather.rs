@@ -13,6 +13,7 @@ pub struct City {
     pub detail: String, // the region and country, to tell same-named places apart
     pub lat: f64,
     pub lon: f64,
+    pub timezone: String, // IANA name, "" if unknown: the zone its clocks run on
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,7 +108,8 @@ pub fn parse_search(body: &str) -> Result<Vec<City>, String> {
             };
             let name = text("name")?.to_string();
             let detail = [text("admin1"), text("country")].into_iter().flatten().filter(|s| *s != name).collect::<Vec<_>>().join(", ");
-            Some(City { name, detail, lat: r.get("latitude")?.num()?, lon: r.get("longitude")?.num()? })
+            let timezone = text("timezone").unwrap_or_default().to_string();
+            Some(City { name, detail, lat: r.get("latitude")?.num()?, lon: r.get("longitude")?.num()?, timezone })
         })
         .collect())
 }
@@ -302,8 +304,8 @@ pub(crate) mod tests {
     #[test]
     fn reads_the_search_results() {
         let cities = parse_search(SEARCH).unwrap();
-        assert_eq!(cities[0], City { name: "Hà Nội".into(), detail: "Việt Nam".into(), lat: 21.0245, lon: 105.84117 });
-        assert_eq!(cities[1], City { name: "Hanoi".into(), detail: "Testé \"x\" 🌧".into(), lat: -15.0, lon: 30.0 });
+        assert_eq!(cities[0], City { name: "Hà Nội".into(), detail: "Việt Nam".into(), lat: 21.0245, lon: 105.84117, timezone: "Asia/Bangkok".into() });
+        assert_eq!(cities[1], City { name: "Hanoi".into(), detail: "Testé \"x\" 🌧".into(), lat: -15.0, lon: 30.0, timezone: "".into() });
         assert_eq!(parse_search(r#"{"generationtime_ms":0.2}"#), Ok(vec![]), "no match");
         assert!(parse_search("<html>").is_err());
         assert!(parse_search(r#"{"results":[}"#).is_err());
