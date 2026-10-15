@@ -125,10 +125,11 @@ impl Desktop {
             return;
         }
         let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
-        let groups: [(&str, Vec<(String, Setting)>); 5] = [
+        let groups: [(&str, Vec<(String, Setting)>); 6] = [
             ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
             ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
             ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
+            ("Giờ đồng hồ", vec![("Giờ máy tính".into(), Setting::CityTime(false)), ("Giờ thành phố".into(), Setting::CityTime(true))]),
             ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
             ("Màn hình", vec![("Tất cả màn hình".into(), Setting::AllScreens(true)), ("Chỉ màn hình chính".into(), Setting::AllScreens(false))]),
         ];

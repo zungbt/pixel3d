@@ -13,6 +13,7 @@ use crate::UserEvent;
 const EVERY: Duration = Duration::from_secs(30 * 60);
 const RETRY: Duration = Duration::from_secs(5 * 60);
 const STALE: Duration = Duration::from_secs(2 * 60 * 60);
+const FADE: Duration = Duration::from_secs(8); // the last city's weather turns into the new one's over this
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -69,16 +70,18 @@ pub fn get(host: &str, path: &str) -> Result<String, String> {
 pub struct LiveWeather {
     place: Option<(f64, f64)>, // None: no city chosen, nothing fetched
     latest: Option<(Weather, Instant)>,
+    held: Option<(Weather, Instant)>, // the last city's, kept while the new one's is fetched
     next: Option<Instant>, // None while a fetch is under way
 }
 
 impl LiveWeather {
     pub fn new(place: Option<(f64, f64)>) -> Self {
-        LiveWeather { place, latest: None, next: Some(Instant::now()) }
+        LiveWeather { place, latest: None, held: None, next: Some(Instant::now()) }
     }
 
     pub fn set_place(&mut self, place: (f64, f64)) {
         self.place = Some(place);
+        self.held = self.shown();
         self.latest = None;
         self.next = self.next.map(|_| Instant::now());
     }
@@ -112,13 +115,28 @@ impl LiveWeather {
             }
             Err(e) => {
                 log::warn!("weather: {e}; trying again in 5 min");
+                self.held = None; // not this city's: back to the made-up weather
                 self.next = Some(now + RETRY);
             }
         }
     }
 
-    /// The real weather, unless there's none yet or it's hours old.
+    /// The real weather, unless there's none yet or it's hours old. Right after a city change the
+    /// last city's weather carries on, then fades into the new one's.
     pub fn current(&self) -> Option<Weather> {
-        self.latest.filter(|(_, at)| at.elapsed() < STALE).map(|(w, _)| w)
+        self.shown().map(|(w, _)| w)
+    }
+
+    // The weather now, and when the newest report it is made of arrived.
+    fn shown(&self) -> Option<(Weather, Instant)> {
+        let fresh = |r: &&(Weather, Instant)| r.1.elapsed() < STALE;
+        match (self.latest.as_ref().filter(fresh), self.held.as_ref().filter(fresh)) {
+            (Some(&(new, at)), Some(&(old, _))) => {
+                let f = (at.elapsed().as_secs_f64() / FADE.as_secs_f64()).min(1.0);
+                Some((Weather::mix(&old, &new, meadow_core::world::smoothstep(f, 0.0, 1.0)), at))
+            }
+            (Some(&latest), None) => Some(latest),
+            (None, held) => held.copied(),
+        }
     }
 }

@@ -1004,6 +1004,11 @@ impl Renderer {
         queue.write_buffer(&self.frog_draw.instances, 0, bytemuck::cast_slice(&parts));
     }
 
+    /// The clouds slid by `by` (world x, z): the sky moving over the ground on a trip between cities.
+    pub fn slide_clouds(&mut self, by: [f64; 2]) {
+        self.clouds.slide(by);
+    }
+
     /// Moves the meadow on to animation time `time` (s), `dt` after the last drawn frame, at unix
     /// time `unix` (s, the weather's), with the post clock as `clock`. Once per frame, before
     /// rendering the views.

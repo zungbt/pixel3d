@@ -162,13 +162,15 @@ impl App {
         #[cfg(not(windows))]
         let weather = None;
         let sky = self.sky.state(time, weather.as_ref());
+        let slide = self.sky.advance(time);
         let clock = ClockPose {
-            hands: self.sky.hands(wreck.behind(unix)),
+            hands: self.sky.hands(wreck.behind(unix), time),
             fallen: wreck.progress(),
             shiver: wreck.shiver(),
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
+        scene.renderer.slide_clouds(slide);
         scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock, weather.as_ref());
         for (i, frame) in frames {
             let view = frame.0.texture.create_view(&Default::default());
@@ -322,6 +324,7 @@ impl App {
             }
             Setting::Fps(_) => {}
             Setting::Clock(on) => self.sky.set_clock(on, self.time),
+            Setting::CityTime(on) => self.sky.set_city_time(on, self.time),
             Setting::Fog(fog) => self.sky.fog = fog,
             Setting::ShowClock(on) => {
                 self.wreck.set(!on, unix_now());
@@ -350,7 +353,7 @@ impl App {
     #[cfg(windows)]
     fn choose_city(&mut self, city: meadow_core::weather::City) {
         log::info!("city: {}, {} ({:.4}, {:.4})", city.name, city.detail, city.lat, city.lon);
-        self.sky.set_place((city.lat, city.lon));
+        self.sky.set_place((city.lat, city.lon), &city.timezone, self.time);
         self.weather.set_place((city.lat, city.lon));
         if let Some(desktop) = self.desktop.as_ref() {
             desktop.set_city(&city.name);
@@ -600,7 +603,11 @@ fn main() {
     }
     let now = Instant::now();
     let mut app = App {
-        sky: sky_clock::SkyClock::new(mode, date, text.as_deref(), settings.fog),
+        sky: {
+            let mut sky = sky_clock::SkyClock::new(mode, date, text.as_deref(), settings.fog);
+            sky.city_time = settings.city_time;
+            sky
+        },
         // Off since `brokenAt` (or now, if that's missing).
         wreck: Wreck::new((!settings.show_clock).then(|| settings.broken_at.map_or_else(unix_now, |t| t as f64))),
         toggle_clock: toggle_clock.map(|every| (every, every)),

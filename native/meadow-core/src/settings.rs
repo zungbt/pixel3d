@@ -16,6 +16,7 @@ pub struct Settings {
     pub show_clock: bool, // the post clock beside the path
     pub broken_at: Option<i64>, // unix s the post clock was turned off (its pieces' age)
     pub all_screens: bool, // wallpaper: the meadow runs across every monitor; false: the primary only
+    pub city_time: bool,  // the post clock shows the chosen city's local time; false: the PC's
 }
 
 /// One changed setting, as the tray menu sends it.
@@ -28,6 +29,7 @@ pub enum Setting {
     ShowClock(bool),
     BrokenAt(i64),
     AllScreens(bool),
+    CityTime(bool),
 }
 
 // The value of `key` in settings.txt's text: its first line that isn't a comment.
@@ -57,6 +59,7 @@ impl Settings {
             show_clock: get("showClock") != Some("false"),
             broken_at: get("brokenAt").and_then(|v| v.parse().ok()),
             all_screens: get("screens") != Some("primary"),
+            city_time: get("clockZone") == Some("city"),
         }
     }
 
@@ -69,6 +72,7 @@ impl Settings {
             Setting::ShowClock(on) => self.show_clock = on,
             Setting::BrokenAt(t) => self.broken_at = Some(t),
             Setting::AllScreens(on) => self.all_screens = on,
+            Setting::CityTime(on) => self.city_time = on,
         }
     }
 }
@@ -83,6 +87,7 @@ impl Setting {
             Setting::ShowClock(on) => ("showClock", on.to_string()),
             Setting::BrokenAt(t) => ("brokenAt", t.to_string()),
             Setting::AllScreens(on) => ("screens", if on { "all" } else { "primary" }.to_string()),
+            Setting::CityTime(on) => ("clockZone", if on { "city" } else { "local" }.to_string()),
         }
     }
 }
@@ -92,9 +97,15 @@ pub fn city(text: &str) -> Option<&str> {
     stored(text, "city").filter(|v| !v.is_empty())
 }
 
-/// `text` with the city's name and place saved.
+/// The chosen city's IANA time zone name, if one was saved with it.
+pub fn city_timezone(text: &str) -> Option<&str> {
+    stored(text, "timezone").filter(|v| !v.is_empty())
+}
+
+/// `text` with the city's name, time zone and place saved.
 pub fn save_city(text: &str, city: &City) -> String {
     let text = put(text, "city", &city.name);
+    let text = put(&text, "timezone", &city.timezone);
     put(&text, "place", &format!("{:.4}, {:.4}", city.lat, city.lon))
 }
 
@@ -126,7 +137,7 @@ fn put(text: &str, key: &str, value: &str) -> String {
 mod tests {
     use super::*;
 
-    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None, all_screens: true };
+    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None, all_screens: true, city_time: false };
 
     #[test]
     fn an_empty_file_gives_the_defaults() {
@@ -136,15 +147,15 @@ mod tests {
 
     #[test]
     fn unexpected_stored_values_fall_back() {
-        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\nscreens = 2\n";
+        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\nscreens = 2\nclockZone = utc\n";
         assert_eq!(Settings::load(text), DEFAULTS);
     }
 
     #[test]
     fn saved_values_load_back() {
-        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000), Setting::AllScreens(false)];
+        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000), Setting::AllScreens(false), Setting::CityTime(true)];
         let text = changes.iter().fold(String::new(), |text, &s| save(&text, s));
-        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000), all_screens: false });
+        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000), all_screens: false, city_time: true });
         let mut set = DEFAULTS;
         changes.iter().for_each(|&s| set.set(s));
         assert_eq!(set, Settings::load(&text), "set agrees with save + load");
@@ -171,10 +182,13 @@ mod tests {
 
     #[test]
     fn the_city_saves_with_its_place() {
-        let hanoi = City { name: "Hà Nội".into(), detail: "Việt Nam".into(), lat: 21.0245, lon: 105.84117 };
+        let hanoi = City { name: "Hà Nội".into(), detail: "Việt Nam".into(), lat: 21.0245, lon: 105.84117, timezone: "Asia/Bangkok".into() };
         let text = save_city("fps = 20\nplace = 1, 2\n", &hanoi);
-        assert_eq!(text, "fps = 20\nplace = 21.0245, 105.8412\ncity = Hà Nội\n");
+        assert_eq!(text, "fps = 20\nplace = 21.0245, 105.8412\ncity = Hà Nội\ntimezone = Asia/Bangkok\n");
         assert_eq!(city(&text), Some("Hà Nội"));
+        assert_eq!(city_timezone(&text), Some("Asia/Bangkok"));
+        assert_eq!(city_timezone("timezone =\n"), None);
+        assert_eq!(city_timezone("fps = 20\n"), None, "an older settings file");
         assert_eq!(crate::sun::parse_place(&text), Ok(Some((21.0245, 105.8412))));
         assert_eq!(city("city =\n"), None);
     }
