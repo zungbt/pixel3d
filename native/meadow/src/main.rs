@@ -6,6 +6,10 @@
 // chosen from the tray sets `place` (and `city`, its name) and brings its real cloud cover and
 // wind, fetched from Open-Meteo every half hour.
 // Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
+// --wallpaper (Windows: behind the desktop icons, with a tray menu, on the E-cores), --hour H
+// (pin the sky at local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the
+// clock), --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
+// WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams).
 // --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
 // local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
 // --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
@@ -556,6 +560,10 @@ fn main() {
         std::panic::set_hook(Box::new(|info| log::error!("{info}"))); // no console to print to
     }
     logger.init();
+    #[cfg(windows)]
+    if wallpaper {
+        wallpaper::efficiency_mode();
+    }
     let text = settings_text();
     let mut settings = Settings::load(text.as_deref().unwrap_or(""));
     match arg(&args, "--fps").as_deref() {

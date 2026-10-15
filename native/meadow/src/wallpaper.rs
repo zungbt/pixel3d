@@ -18,7 +18,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
-use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    ProcessPowerThrottling, SetProcessInformation,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::BOOL;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -337,6 +340,20 @@ unsafe extern "system" fn find_icons_holder(hwnd: HWND, out: LPARAM) -> BOOL {
 /// Hands the paused app's pages back to Windows (146 MB -> ~1 MB); they fault back in from standby on resume.
 pub fn trim_memory() {
     unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
+}
+
+/// EcoQoS (Task Manager's efficiency mode, without its idle priority): Windows runs the app on the
+/// E-cores at a low clock, leaving the P-cores to the user. A frame's ~2 ms of CPU has room to spare.
+pub fn efficiency_mode() {
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    };
+    let ok = unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, (&raw const state).cast(), size_of_val(&state) as u32) };
+    if ok == 0 {
+        log::warn!("efficiency mode: error {}", unsafe { GetLastError() });
+    }
 }
 
 // For Desktop::covered: marks the monitor a maximised window, or a fullscreen foreground one, hides.
