@@ -55,7 +55,7 @@ const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
 
 #[cfg(windows)]
 pub enum UserEvent {
-    Menu(tray_icon::menu::MenuEvent),
+    Tray(wallpaper::TrayAction),                                              // a tray menu click
     City(meadow_core::weather::City),                                         // chosen in the search
     Weather((f64, f64), Result<meadow_core::weather::Weather, String>), // a fetch for this place came back
 }
@@ -367,7 +367,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(windows)]
         if let Some(desktop) = self.desktop.as_mut() {
-            desktop.show_tray(&self.settings, self.city.as_deref());
+            desktop.show_tray(&self.settings, self.city.as_deref(), self.proxy.clone());
         }
         if self.scene.is_none() {
             self.open(event_loop);
@@ -376,19 +376,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     #[cfg(windows)]
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        let event = match event {
-            UserEvent::Menu(event) => event,
+        let action = match event {
+            UserEvent::Tray(action) => action,
             UserEvent::City(city) => return self.choose_city(city),
             UserEvent::Weather(place, reply) => return self.weather.got(place, reply),
         };
-        match self.desktop.as_ref().and_then(|desktop| desktop.menu(&event)) {
-            Some(wallpaper::TrayAction::Exit) => {
+        match action {
+            wallpaper::TrayAction::Exit => {
                 log::info!("tray: exit");
                 event_loop.exit();
             }
-            Some(wallpaper::TrayAction::Set(setting)) => self.apply(setting),
-            Some(wallpaper::TrayAction::City) => city::open(self.proxy.clone(), self.city.clone()),
-            None => {}
+            wallpaper::TrayAction::Set(setting) => self.apply(setting),
+            wallpaper::TrayAction::City => city::open(self.proxy.clone(), self.city.clone()),
         }
     }
 
@@ -594,13 +593,6 @@ fn main() {
     log::info!("settings: {settings:?}");
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
-    #[cfg(windows)]
-    {
-        let proxy = event_loop.create_proxy();
-        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(UserEvent::Menu(event));
-        }));
-    }
     let now = Instant::now();
     let mut app = App {
         sky: {
