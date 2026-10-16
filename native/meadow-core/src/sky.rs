@@ -93,6 +93,59 @@ pub struct SkyState {
     pub fog: f64, // ground fog amount, 0-1
 }
 
+impl SkyState {
+    /// `a` turning into `b`, `f` 0-1: every number blends, the phase the short way round midnight.
+    pub fn mix(a: &SkyState, b: &SkyState, f: f64) -> SkyState {
+        let swing = (b.phase - a.phase + 1.5).rem_euclid(1.0) - 0.5;
+        SkyState {
+            phase: (a.phase + swing * f).rem_euclid(1.0),
+            elevation: lerp(a.elevation, b.elevation, f),
+            daylight: lerp(a.daylight, b.daylight, f),
+            sun_pos: mix(a.sun_pos, b.sun_pos, f),
+            sun_color: mix(a.sun_color, b.sun_color, f),
+            hemi_sky: mix(a.hemi_sky, b.hemi_sky, f),
+            background: mix(a.background, b.background, f),
+            fog_color: mix(a.fog_color, b.fog_color, f),
+            fog: lerp(a.fog, b.fog, f),
+        }
+    }
+}
+
+const GAP: f64 = 2.0; // s of wall time without a frame that count as a pause
+const CATCH_UP: f64 = 4.0; // s of animation time the sky takes to turn to the hour it is after one
+
+/// The sky follows the wall clock and the weather, both of which move on while nothing is drawn
+/// (the wallpaper covered, the window minimised): after a pause the sky and its cloud cover turn
+/// from the last drawn ones to today's over CATCH_UP s instead of jumping there.
+#[derive(Default)]
+pub struct CatchUp {
+    shown: Option<(SkyState, f64, f64)>, // the last frame's sky, cover and unix time
+    from: Option<(SkyState, f64, f64)>,  // turning from this sky and cover since this animation time
+}
+
+impl CatchUp {
+    /// What to draw at animation time `time`, unix time `unix` (s) for the live `sky` and `cover`.
+    pub fn step(&mut self, sky: SkyState, cover: f64, time: f64, unix: f64) -> (SkyState, f64) {
+        if let Some((s, c, at)) = self.shown
+            && unix - at > GAP
+        {
+            self.from = Some((s, c, time));
+        }
+        let shown = match self.from {
+            Some((s, c, start)) if time - start < CATCH_UP => {
+                let f = smoothstep((time - start) / CATCH_UP, 0.0, 1.0);
+                (SkyState::mix(&s, &sky, f), lerp(c, cover, f))
+            }
+            _ => {
+                self.from = None;
+                (sky, cover)
+            }
+        };
+        self.shown = Some((shown.0, shown.1, unix));
+        shown
+    }
+}
+
 /// The web's `update(t, dayT, fog)` for `fog.mode = 'auto'`; other modes: set `fog` with fog_amount.
 pub fn sky_state(day_t: f64, winter: f64) -> SkyState {
     let angle = (day_t / DAY_LENGTH + DAY_START) * PI * 2.0;
@@ -146,6 +199,38 @@ fn lit(phase: f64, elevation: f64, sun_pos: [f64; 3], winter: f64) -> SkyState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn after_a_pause_the_sky_turns_to_the_hour_instead_of_jumping() {
+        let (dusk, night) = (sky_at(0.48, 0.05, 4.0, 0.0), sky_at(0.6, -0.5, 5.0, 0.0));
+        let mut c = CatchUp::default();
+        // Frames a fraction of a second apart follow the live sky.
+        assert_eq!(c.step(dusk, 0.2, 10.0, 1000.0).1, 0.2);
+        assert_eq!(c.step(dusk, 0.3, 10.1, 1000.1).1, 0.3);
+        // Half an hour without a frame (animation time stood still): it starts where it was drawn.
+        let (sky, cover) = c.step(night, 0.9, 10.1, 2800.0);
+        assert!(sky.background == dusk.background && cover == 0.3);
+        let (sky, cover) = c.step(night, 0.9, 10.1 + CATCH_UP / 2.0, 2802.0);
+        assert!((sky.daylight - (dusk.daylight + night.daylight) / 2.0).abs() < 1e-9 && (cover - 0.6).abs() < 1e-9, "halfway");
+        let (sky, cover) = c.step(night, 0.9, 10.1 + CATCH_UP, 2804.0);
+        assert!(sky.background == night.background && cover == 0.9, "there");
+    }
+
+    #[test]
+    fn one_sky_turns_into_another() {
+        let (dusk, noon) = (sky_at(0.48, 0.05, 4.0, 0.0), sky_at(0.25, 1.2, 3.0, 0.0));
+        for (f, want) in [(0.0, &dusk), (1.0, &noon)] {
+            let got = SkyState::mix(&dusk, &noon, f);
+            assert!((got.phase - want.phase).abs() < 1e-9 && got.background == want.background && got.sun_pos == want.sun_pos, "at {f}");
+        }
+        let half = SkyState::mix(&dusk, &noon, 0.5);
+        assert!((half.daylight - (dusk.daylight + noon.daylight) / 2.0).abs() < 1e-9);
+        assert!((half.phase - 0.365).abs() < 1e-9);
+        // Across midnight (phase 1 -> 0) the short way, not back through the whole day.
+        let (late, early) = (sky_at(0.95, -0.9, 0.0, 0.0), sky_at(0.05, 0.1, 1.5, 0.0));
+        assert!((SkyState::mix(&late, &early, 0.5).phase - 0.0).abs() < 1e-9);
+        assert!((SkyState::mix(&late, &early, 0.25).phase - 0.975).abs() < 1e-9);
+    }
 
     const EQUINOX: SunTimes = SunTimes { rise: 6.0, set: 18.0 };
     const WINTER: SunTimes = SunTimes { rise: 6.6, set: 17.25 }; // a short day
