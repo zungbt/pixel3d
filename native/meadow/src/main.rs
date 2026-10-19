@@ -57,7 +57,7 @@ const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
 pub enum UserEvent {
     Tray(wallpaper::TrayAction),                                              // a tray menu click
     City(meadow_core::weather::City),                                         // chosen in the search
-    Weather((f64, f64), Result<meadow_core::weather::Weather, String>), // a fetch for this place came back
+    Weather(Vec<(f64, f64)>, Result<Vec<meadow_core::weather::Weather>, String>), // a fetch for these places came back
 }
 #[cfg(not(windows))]
 type UserEvent = ();
@@ -158,10 +158,11 @@ impl App {
             return;
         }
         #[cfg(windows)]
-        let weather = self.weather.current();
+        let weather = self.weather.current(self.sky.progress(time));
         #[cfg(not(windows))]
         let weather = None;
         let sky = self.sky.state(time, weather.as_ref());
+        let eta = self.sky.eta(time);
         let slide = self.sky.advance(time);
         let clock = ClockPose {
             hands: self.sky.hands(wreck.behind(unix), time),
@@ -170,6 +171,12 @@ impl App {
             weathering: wreck.weathering(unix),
             glow: wreck.glow(),
         };
+        // The ETA in the corner while travelling.
+        #[cfg(windows)]
+        let label = eta.map(|(km, secs, shown)| (meadow_core::label::eta(self.city.as_deref().unwrap_or(""), km, secs, self.settings.unit), shown));
+        #[cfg(not(windows))]
+        let label = eta.map(|(_, _, shown)| ([String::new(), String::new()], shown));
+        scene.renderer.set_label(&scene.gpu.queue, label);
         scene.renderer.slide_clouds(slide);
         scene.renderer.update(&scene.gpu.queue, time, dt, unix, &sky, &clock, weather.as_ref());
         for (i, frame) in frames {
@@ -238,6 +245,11 @@ impl App {
             } else {
                 log::warn!("--gpu-time: no timestamp queries on this adapter");
             }
+        }
+        #[cfg(windows)]
+        if let Some(desktop) = self.desktop.as_ref().filter(|d| !d.fallback) {
+            let (left, bottom) = desktop.label_inset();
+            renderer.set_label_inset(left, bottom);
         }
         for (i, s) in surfaces.iter().enumerate() {
             renderer.resize(&gpu.device, &gpu.queue, i, s.config.width, s.config.height);
@@ -335,7 +347,8 @@ impl App {
                     save_setting(broken_at);
                 }
             }
-            Setting::BrokenAt(_) => {}
+            Setting::BrokenAt(_) | Setting::Unit(_) => {}
+            Setting::Speed(speed) => self.sky.set_speed(speed.km_s(), self.time),
             Setting::AllScreens(_) => {
                 // Reopened on the new monitors at once.
                 #[cfg(windows)]
@@ -353,8 +366,9 @@ impl App {
     #[cfg(windows)]
     fn choose_city(&mut self, city: meadow_core::weather::City) {
         log::info!("city: {}, {} ({:.4}, {:.4})", city.name, city.detail, city.lat, city.lon);
+        let (from, progress) = (self.sky.shown(), self.sky.progress(self.time));
         self.sky.set_place((city.lat, city.lon), &city.timezone, self.time);
-        self.weather.set_place((city.lat, city.lon));
+        self.weather.set_place(from, (city.lat, city.lon), progress);
         if let Some(desktop) = self.desktop.as_ref() {
             desktop.set_city(&city.name);
         }
@@ -600,6 +614,7 @@ fn main() {
         sky: {
             let mut sky = sky_clock::SkyClock::new(mode, date, text.as_deref(), settings.fog);
             sky.city_time = settings.city_time;
+            sky.set_speed(settings.speed.km_s(), 0.0);
             sky
         },
         // Off since `brokenAt` (or now, if that's missing).

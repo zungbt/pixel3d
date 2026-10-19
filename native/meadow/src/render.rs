@@ -16,6 +16,7 @@ use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
 use meadow_core::frog::{self, Frog};
 use meadow_core::gnats::{self, Gnats};
+use meadow_core::label;
 use meadow_core::flowers::{self, HEAD_R, HEAD_Y};
 use meadow_core::flight::V3;
 use meadow_core::sky::{self, SkyState};
@@ -128,6 +129,7 @@ struct PostParams {
     pixel_size: u32,
     manual_srgb: u32,
     rain: [f32; 4], // how hard, its clock, the slant, the brightness: written each frame
+    label: [f32; 4], // the ETA: how much it shows (0-1), its corner's art px in from the left and the bottom; written each frame
 }
 
 #[derive(Clone, Copy)]
@@ -330,6 +332,8 @@ struct Binds {
     shadow_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     cloud_sampler: wgpu::Sampler,
+    label: wgpu::Texture, // meadow_core::label's mask, shared by every view's post pass
+    label_view: wgpu::TextureView,
 }
 
 /// A screen in physical px: its top-left corner relative to the primary's, and its size. The first
@@ -339,6 +343,8 @@ pub struct Screen {
     pub offset: (i32, i32),
     pub size: (u32, u32),
 }
+
+const LABEL_MARGIN: u32 = 4; // art px between the ETA and the screen's corner
 
 // How far past a pane the world must exist: a crown standing just below the bottom edge still
 // reaches into it.
@@ -392,6 +398,9 @@ pub struct Renderer {
     wind: Wind,
     rain: Rain,
     post_rain: [f32; 4],
+    label_lines: Vec<String>, // what the label mask shows
+    label_shown: f32,
+    label_inset: (u32, u32), // screen px kept clear at the primary's left and bottom: the taskbar
     catch_up: sky::CatchUp,
     frog_draw: Draw,
     pixel_size: u32,
@@ -697,6 +706,7 @@ impl Renderer {
                 texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(2, wgpu::TextureSampleType::Depth),
                 uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
 
@@ -781,7 +791,18 @@ impl Renderer {
             cache: None,
         });
 
-        let binds = Binds { post_layout, scene_layout: scene_bind_layout, shadow_view, shadow_sampler, cloud_sampler };
+        let label = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("label"),
+            size: wgpu::Extent3d { width: label::SIZE.0, height: label::SIZE.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let label_view = label.create_view(&Default::default());
+        let binds = Binds { post_layout, scene_layout: scene_bind_layout, shadow_view, shadow_sampler, cloud_sampler, label, label_view };
         let ground = linear(HEMI_GROUND.0) * HEMI_GROUND.1;
         // The time-of-day fields are set by set_sky, before every upload.
         let globals = Globals {
@@ -878,6 +899,9 @@ impl Renderer {
             wind: Wind::default(),
             rain: Rain::default(),
             post_rain: [0.0; 4],
+            label_lines: Vec::new(),
+            label_shown: 0.0,
+            label_inset: (0, 0),
             catch_up: sky::CatchUp::default(),
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
@@ -897,6 +921,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&normal) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
                 wgpu::BindGroupEntry { binding: 3, resource: post_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&binds.label_view) },
             ],
         });
         let (size, cloud_map) = cloud_map(pane, art);
@@ -958,7 +983,7 @@ impl Renderer {
             view.targets = Self::targets(device, &self.binds, &view.post_buf, art, pane);
         }
         view.grass.set_view(view.pane, view.art);
-        let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain };
+        let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain, label: [0.0; 4] };
         queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
         log::info!(
             "view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn{}",
@@ -1029,6 +1054,27 @@ impl Renderer {
     }
 
     /// The clouds slid by `by` (world x, z): the sky moving over the ground on a trip between cities.
+    /// The ETA's lines and how much they show (0-1), or None: nothing in the corner.
+    pub fn set_label(&mut self, queue: &wgpu::Queue, label: Option<([String; 2], f64)>) {
+        let Some((lines, shown)) = label else {
+            self.label_shown = 0.0;
+            return;
+        };
+        if self.label_lines != lines {
+            let size = wgpu::Extent3d { width: label::SIZE.0, height: label::SIZE.1, depth_or_array_layers: 1 };
+            let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(label::SIZE.0), rows_per_image: None };
+            queue.write_texture(self.binds.label.as_image_copy(), &label::draw(&lines), layout, size);
+            self.label_lines = lines.to_vec();
+        }
+        self.label_shown = shown as f32;
+    }
+
+    /// Screen px the primary's taskbar takes at its left and bottom, for the ETA to keep clear of.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_label_inset(&mut self, left: u32, bottom: u32) {
+        self.label_inset = (left, bottom);
+    }
+
     pub fn slide_clouds(&mut self, by: [f64; 2]) {
         self.clouds.slide(by);
     }
@@ -1074,6 +1120,11 @@ impl Renderer {
         };
         queue.write_buffer(&view.globals_buf, 0, bytemuck::bytes_of(&globals));
         queue.write_buffer(&view.post_buf, std::mem::offset_of!(PostParams, rain) as u64, bytemuck::bytes_of(&self.post_rain));
+        // On the primary only, LABEL_MARGIN art px in from its corner, clear of the taskbar.
+        let shown = if i == 0 { self.label_shown } else { 0.0 };
+        let (left, bottom) = (self.label_inset.0.div_ceil(self.pixel_size), self.label_inset.1.div_ceil(self.pixel_size));
+        let label = [shown, (LABEL_MARGIN + left) as f32, (LABEL_MARGIN + bottom) as f32, 0.0];
+        queue.write_buffer(&view.post_buf, std::mem::offset_of!(PostParams, label) as u64, bytemuck::bytes_of(&label));
         let mut encoder = device.create_command_encoder(&Default::default());
         let timer = self.timer.as_ref().filter(|_| i == 0);
         let depth_attachment = |view| {

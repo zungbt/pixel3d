@@ -6,12 +6,14 @@ struct Post {
     pixel_size: u32,
     manual_srgb: u32, // 1 when the swapchain isn't *Srgb, so the shader encodes
     rain: vec4f,      // x: how hard it's raining, y: its clock (s), z: the streaks' slant, w: their brightness
+    label: vec4f,     // the ETA: x how much it shows (0-1), y and z its corner's art px in from the left and the bottom
 }
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
 @group(0) @binding(1) var normal_tex: texture_2d<f32>;
 @group(0) @binding(2) var depth_tex: texture_depth_2d;
 @group(0) @binding(3) var<uniform> post: Post;
+@group(0) @binding(4) var label_tex: texture_2d<f32>; // the ETA's letters (1) and their outline (0.5)
 
 const NORMAL_EDGE: f32 = 0.3;
 const DEPTH_EDGE: f32 = 0.4;
@@ -83,6 +85,19 @@ fn rain_at(p: vec2i) -> f32 {
     return select(0.0, 1.0, drop && r.x > 0.01);
 }
 
+// The ETA in the bottom-left corner: cream letters outlined in near-black, an art pixel each.
+fn label_over(p: vec2i, under: vec3f) -> vec3f {
+    let size = vec2i(textureDimensions(label_tex));
+    let q = vec2i(p.x - i32(post.label.y), p.y - (i32(post.art.y) - i32(post.label.z) - size.y));
+    if post.label.x <= 0.0 || any(q < vec2i(0)) || any(q >= size) {
+        return under;
+    }
+    let m = textureLoad(label_tex, q, 0).r;
+    let letter = m > 0.75;
+    let ink = select(vec3f(0.02, 0.025, 0.02), vec3f(1.0, 0.93, 0.75), letter);
+    return mix(under, ink, select(0.0, post.label.x * select(0.75, 1.0, letter), m > 0.25));
+}
+
 fn srgb_encode(c: vec3f) -> vec3f {
     let lo = c * 12.92;
     let hi = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
@@ -100,6 +115,7 @@ fn fs_post(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let strength = select(1.0 + NORMAL_EDGE * nei, 1.0 - DEPTH_EDGE * dei, dei > 0.0);
     var out = clamp(color * strength, vec3f(0.0), vec3f(1.0));
     out = mix(out, vec3f(0.75, 0.8, 0.9) * post.rain.w, 0.5 * rain_at(p));
+    out = label_over(p, out);
     if post.manual_srgb == 1u {
         out = srgb_encode(out);
     }

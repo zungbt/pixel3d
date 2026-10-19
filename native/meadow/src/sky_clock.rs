@@ -11,30 +11,64 @@ use meadow_core::weather::Weather;
 use meadow_core::settings;
 use meadow_core::world::{lerp, smoothstep};
 
-// A trip's length and its cloud slide grow with the distance and level off over long hauls: the
-// first 1000 km count most, and the far side of the world is not much longer than half of it.
-const NEAR_SECS: f64 = 3.0; // a hop next door takes this long...
-const FAR_SECS: f64 = 10.0; // ...and the longest haul this
-const FAR_SLIDE: f64 = 40.0; // world units the clouds slide over the longest haul
-const LEVEL_KM: f64 = 3000.0; // distance over which a trip reaches 63% of its way to the longest
+// A trip goes straight there at the chosen speed (km/s), speeding up over RAMP and slowing down
+// over RAMP at the end, the clouds sliding past at CLOUD_PER_KM: Da Nang to Buon Ma Thuot takes
+// some 6 minutes at 1 km/s.
+const RAMP: f64 = 2.0; // s
+const CLOUD_PER_KM: f64 = 3.0; // world units (about 2.5 m)
+const CLOCK_SECS: f64 = 3.0; // the post clock's hands take at least this long to slide to a new zone
+const ETA_FADE: f64 = 1.0; // s the ETA takes to show at the start and to go at the end
 
-/// How much of the longest haul a trip of `km` is, 0-1.
-fn haul(km: f64) -> f64 {
-    1.0 - (-km / LEVEL_KM).exp()
-}
-
-/// How long a trip of `km` takes, s.
-fn trip_secs(km: f64) -> f64 {
-    NEAR_SECS + (FAR_SECS - NEAR_SECS) * haul(km)
-}
-
-/// A trip from where the sky was last drawn to the chosen place.
+/// A trip from where the sky was last drawn to the chosen place, flown at `speed` from `start`
+/// on, `done` km of it behind it then. A trip whose speed changed goes on at once at the new one.
 #[derive(Clone, Copy)]
 struct Travel {
     from: (f64, f64),
+    km: f64,
     start: f64, // animation time
-    secs: f64,
-    cloud_per_km: f64, // world units the clouds slide per km the sky travels on this trip
+    done: f64,
+    speed: f64,
+    ramp_in: f64, // s to get up to speed: RAMP from standing, none when the speed changed
+    ramp_out: f64, // s to slow down at the end
+}
+
+impl Travel {
+    fn new(from: (f64, f64), km: f64, start: f64, speed: f64) -> Self {
+        let ramp = RAMP.min(km / speed); // a hop under RAMP's worth never gets up to speed
+        Travel { from, km, start, done: 0.0, speed, ramp_in: ramp, ramp_out: ramp }
+    }
+
+    /// The rest of the trip from animation time `t` at `speed`, without stopping.
+    fn at_speed(&self, t: f64, speed: f64) -> Self {
+        let done = self.gone(t);
+        let ramp_out = RAMP.min(2.0 * (self.km - done) / speed);
+        Travel { done, start: t, speed, ramp_in: 0.0, ramp_out, ..*self }
+    }
+
+    /// Seconds from `start` to the end.
+    fn secs(&self) -> f64 {
+        (self.km - self.done) / self.speed + (self.ramp_in + self.ramp_out) / 2.0
+    }
+
+    /// km of the whole trip behind it at animation time `t`.
+    fn gone(&self, t: f64) -> f64 {
+        let (secs, rest, v) = (self.secs(), self.km - self.done, self.speed);
+        let t = (t - self.start).clamp(0.0, secs);
+        let leg = if t >= secs {
+            rest
+        } else if t < self.ramp_in {
+            v * t * t / (2.0 * self.ramp_in)
+        } else if t <= secs - self.ramp_out {
+            v * (t - self.ramp_in / 2.0)
+        } else {
+            rest - v * (secs - t).powi(2) / (2.0 * self.ramp_out)
+        };
+        self.done + leg
+    }
+
+    fn arrived(&self, t: f64) -> bool {
+        t - self.start >= self.secs()
+    }
 }
 
 /// The post clock's offset from UTC sliding from where it stood to the zone it now shows.
@@ -57,6 +91,7 @@ pub struct SkyClock {
     tz: TimeZone,
     place: (f64, f64),
     travel: Option<Travel>, // None once arrived
+    speed: f64,             // km/s the next trip goes at
     shown: (f64, f64),      // where the sky was last drawn: a new trip starts here
     city_tz: Option<TimeZone>, // the chosen city's own zone, if known
     pub city_time: bool,       // the post clock shows that zone's time; false: the PC's
@@ -190,19 +225,24 @@ impl SkyClock {
             hhmm(today.set),
         );
         let city_tz = settings.and_then(settings::city_timezone).and_then(|name| TimeZone::get(name).ok());
-        Self { mode, tz, place, travel: None, shown: place, city_tz, city_time: false, glide: None, cycle_start, date, fog }
+        Self { mode, tz, place, travel: None, speed: 1.0, shown: place, city_tz, city_time: false, glide: None, cycle_start, date, fog }
     }
 
-    /// A city was chosen: the sky travels to it, from where it stands now, from animation time
-    /// `now` for NEAR_SECS to FAR_SECS by the distance; the sun rises and sets there afterwards.
-    /// `timezone` is its IANA zone name ("" if unknown), for the post clock.
+    /// Where the sky was last drawn: a trip to a new city starts there.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn shown(&self) -> (f64, f64) {
+        self.shown
+    }
+
+    /// A city was chosen: the sky travels to it at the chosen speed, from where it stands now, from
+    /// animation time `now`; the sun rises and sets there afterwards. `timezone` is its IANA zone
+    /// name ("" if unknown), for the post clock, whose hands slide there over the trip.
     #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
     pub fn set_place(&mut self, place: (f64, f64), timezone: &str, now: f64) {
         let (km, _) = sun::step(self.shown, place);
-        self.glide_clock(now, trip_secs(km), |sky| sky.city_tz = TimeZone::get(timezone).ok());
-        let h = haul(km);
-        let cloud_per_km = if km > 0.0 { h * FAR_SLIDE / km } else { 0.0 };
-        self.travel = Some(Travel { from: self.shown, start: now, secs: trip_secs(km), cloud_per_km });
+        let trip = Travel::new(self.shown, km, now, self.speed);
+        self.glide_clock(now, trip.secs().max(CLOCK_SECS), |sky| sky.city_tz = TimeZone::get(timezone).ok());
+        self.travel = (km > 0.0).then_some(trip);
         self.place = place;
         let day = today(&self.tz, self.date);
         let today = sun::sun_times(day.date, day.offset_min, place);
@@ -212,23 +252,46 @@ impl SkyClock {
     /// Where the sky is at animation time `t` (s): on the great circle from the old city to the
     /// chosen one, or at the chosen one.
     pub fn place_at(&self, t: f64) -> (f64, f64) {
-        match self.travel {
-            Some(Travel { from, start, secs, .. }) => {
-                let f = smoothstep(((t - start) / secs).clamp(0.0, 1.0), 0.0, 1.0);
-                sun::great_circle(from, self.place, f)
-            }
-            None => self.place,
+        match (self.travel, self.progress(t)) {
+            (Some(Travel { from, .. }), Some(f)) => sun::great_circle(from, self.place, f),
+            _ => self.place,
         }
     }
 
+    /// How much of the trip under way is behind the sky at animation time `t`, 0-1; None if arrived.
+    pub fn progress(&self, t: f64) -> Option<f64> {
+        self.travel.map(|trip| trip.gone(t) / trip.km)
+    }
+
+    /// The speed (km/s) trips go at from animation time `now`, the one under way included; the
+    /// post clock's hands then take the rest of it to get there.
+    pub fn set_speed(&mut self, speed: f64, now: f64) {
+        self.speed = speed;
+        if let Some(trip) = self.travel.filter(|trip| !trip.arrived(now)) {
+            let trip = trip.at_speed(now, speed);
+            self.travel = Some(trip);
+            if self.glide.is_some() {
+                self.glide_clock(now, trip.secs().max(CLOCK_SECS), |_| {});
+            }
+        }
+    }
+
+    /// The trip under way at animation time `t`: (km, s) still to go, and how much the ETA shows, 0-1.
+    pub fn eta(&self, t: f64) -> Option<(f64, f64, f64)> {
+        let trip = self.travel.filter(|trip| !trip.arrived(t))?;
+        let left = trip.secs() - (t - trip.start);
+        let shown = (t - (trip.start - trip.done / trip.speed)).min(left) / ETA_FADE;
+        Some((trip.km - trip.gone(t), left, shown.clamp(0.0, 1.0)))
+    }
+
     /// Notes that the sky is drawn at `t` and returns how far the clouds slide over the ground
-    /// (world x, z) since the last frame: against the way the sky travelled, FAR_SLIDE at most.
+    /// (world x, z) since the last frame: against the way the sky travelled.
     pub fn advance(&mut self, t: f64) -> [f64; 2] {
         let here = self.place_at(t);
         let (km, bearing) = sun::step(self.shown, here);
         self.shown = here;
-        let per_km = self.travel.map_or(0.0, |trip| trip.cloud_per_km);
-        if self.travel.is_some_and(|trip| t - trip.start >= trip.secs) {
+        let per_km = if self.travel.is_some() { CLOUD_PER_KM } else { 0.0 };
+        if self.travel.is_some_and(|trip| trip.arrived(t)) {
             self.travel = None;
         }
         // Against the way travelled, on the compass the sun is placed by (east right, north up).
@@ -245,7 +308,7 @@ impl SkyClock {
 
     /// The post clock shows the chosen city's time (or the PC's): its hands slide there.
     pub fn set_city_time(&mut self, on: bool, now: f64) {
-        self.glide_clock(now, NEAR_SECS, |sky| sky.city_time = on);
+        self.glide_clock(now, CLOCK_SECS, |sky| sky.city_time = on);
     }
 
     // The offset (minutes east of UTC) the post clock's hands show for `instant` at animation time `t`.
@@ -308,6 +371,15 @@ mod tests {
 
     const SUN: SunTimes = SunTimes { rise: 6.0, set: 18.0 };
 
+    // A fresh trip of `km` at 1 km/s, the default: how long it takes, and how much is behind it `t` s in.
+    fn trip_secs(km: f64) -> f64 {
+        Travel::new((0.0, 0.0), km, 0.0, 1.0).secs()
+    }
+
+    fn trip_share(km: f64, t: f64) -> f64 {
+        Travel::new((0.0, 0.0), km, 0.0, 1.0).gone(t) / km
+    }
+
     fn shown_hour(day_t: f64) -> f64 {
         sky::phase_to_hour(sky::sky_state(day_t, 0.0).phase, SUN)
     }
@@ -353,14 +425,51 @@ mod tests {
     }
 
     #[test]
-    fn a_short_hop_is_quick_and_gentle_and_a_long_haul_slower_and_levels_off() {
-        let (hanoi, london, far_side) = (1150.0, 9500.0, 20000.0);
-        assert!((trip_secs(0.0) - NEAR_SECS).abs() < 1e-9);
-        assert!(trip_secs(hanoi) > trip_secs(20.0) && trip_secs(london) > trip_secs(hanoi));
-        assert!(trip_secs(far_side) < FAR_SECS, "never longer than the longest haul");
-        assert!(trip_secs(far_side) - trip_secs(london) < 0.5, "and nearly flat out there");
-        assert!(haul(20.0) * FAR_SLIDE < 1.0, "a hop of 20 km barely moves the clouds");
-        assert!(haul(far_side) * FAR_SLIDE <= FAR_SLIDE);
+    fn a_trip_goes_at_1_km_a_second_after_speeding_up_gently() {
+        let km = sun::step((16.0544, 108.2022), (12.6667, 108.05)).0; // Da Nang to Buon Ma Thuot
+        assert!((trip_secs(km) - (km + RAMP)).abs() < 1e-9 && (370.0..390.0).contains(&km), "{km} km");
+        let share = |t: f64| trip_share(km, t);
+        assert_eq!((share(-1.0), share(0.0), share(trip_secs(km) + 1.0)), (0.0, 0.0, 1.0));
+        assert!(((share(100.0) - share(99.0)) * km - 1.0).abs() < 1e-9, "cruising at 1 km/s");
+        assert!((share(0.2) - share(0.1)) * km < 0.2, "slow off the mark");
+        let steps: Vec<f64> = (0..=400).map(|k| share(k as f64)).collect();
+        assert!(steps.windows(2).all(|w| w[1] >= w[0]), "never back");
+        // A hop of 1 km never gets up to speed: 2 s, halfway at 1 s.
+        assert_eq!(trip_secs(1.0), 2.0);
+        assert!((trip_share(1.0, 1.0) - 0.5).abs() < 1e-12);
+        assert_eq!(trip_secs(0.0), 0.0);
+    }
+
+    #[test]
+    fn a_new_speed_mid_trip_goes_on_from_where_it_is() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_place((0.0, 90.0), "", 0.0);
+        let km = sun::step((0.0, 0.0), (0.0, 90.0)).0;
+        let before = sky.progress(100.0).unwrap();
+        sky.set_speed(5.0, 100.0);
+        assert!((sky.progress(100.0).unwrap() - before).abs() < 1e-12, "no jump");
+        assert!(((sky.progress(101.0).unwrap() - before) * km - 5.0).abs() < 1e-9, "on at 5 km/s at once");
+        let (left, secs, _) = sky.eta(100.0).unwrap();
+        assert!((secs - (left / 5.0 + RAMP / 2.0)).abs() < 1e-9, "slowing down at the end: {left} km in {secs} s");
+        assert!(sky.progress(100.0 + secs - 0.01).unwrap() < 1.0 && sky.eta(100.0 + secs + 1e-9).is_none(), "arrives then");
+        // The next trip starts at the new speed.
+        sky.advance(100.0 + secs + 1e-9);
+        sky.set_place((0.0, 0.0), "", 1e5);
+        assert!((sky.eta(1e5).unwrap().1 - (km / 5.0 + RAMP)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_eta_counts_down_and_fades_in_and_out() {
+        let mut sky = sky_at("place = 0, 0\n");
+        assert!(sky.eta(0.0).is_none(), "not travelling");
+        sky.set_place((0.0, 1.0), "", 10.0); // 111 km
+        let km = sun::step((0.0, 0.0), (0.0, 1.0)).0;
+        let secs = trip_secs(km);
+        assert_eq!(sky.eta(10.0), Some((km, secs, 0.0)), "the whole way, not yet shown");
+        let (left, to_go, shown) = sky.eta(60.0).unwrap();
+        assert!((left - (km - 49.0)).abs() < 1e-9 && (to_go - (secs - 50.0)).abs() < 1e-9 && shown == 1.0);
+        assert!((sky.eta(10.0 + 0.5).unwrap().2 - 0.5).abs() < 1e-9 && (sky.eta(10.0 + secs - 0.25).unwrap().2 - 0.25).abs() < 1e-9);
+        assert!(sky.eta(10.0 + secs).is_none(), "arrived");
     }
 
     #[test]
@@ -390,16 +499,16 @@ mod tests {
                 total[1] += s[1];
             }
             assert_eq!(sky.advance(secs + 1.0), [0.0, 0.0], "arrived: nothing more");
-            (total, haul(sun::step((0.0, 0.0), to).0) * FAR_SLIDE)
+            (total, sun::step((0.0, 0.0), to).0 * CLOUD_PER_KM)
         };
         // Due east: the clouds go to the screen's left, i.e. against EAST.
         let (total, by) = slid((0.0, 90.0));
         let want = [-sky::EAST[0] * by, -sky::EAST[1] * by];
-        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "east: {total:?} not {want:?}");
+        assert!((total[0] - want[0]).abs() < 1e-6 * by && (total[1] - want[1]).abs() < 1e-6 * by, "east: {total:?} not {want:?}");
         // Due north: down the screen, against NORTH.
         let (total, by) = slid((10.0, 0.0));
         let want = [-sky::NORTH[0] * by, -sky::NORTH[1] * by];
-        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "north: {total:?} not {want:?}");
+        assert!((total[0] - want[0]).abs() < 1e-6 * by && (total[1] - want[1]).abs() < 1e-6 * by, "north: {total:?} not {want:?}");
     }
 
     #[test]
@@ -424,11 +533,22 @@ mod tests {
         assert_eq!(offset_at(&sky, 10.0), pc, "the PC's time until asked for the city's");
         sky.set_city_time(true, 20.0);
         assert!((offset_at(&sky, 20.0) - pc).abs() < 1e-9, "starts where the hands were");
-        assert!((offset_at(&sky, 20.0 + NEAR_SECS / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway at half the time");
-        assert_eq!(offset_at(&sky, 20.0 + NEAR_SECS), 540.0, "Tokyo is UTC+9");
+        assert!((offset_at(&sky, 20.0 + CLOCK_SECS / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway at half the time");
+        assert_eq!(offset_at(&sky, 20.0 + CLOCK_SECS), 540.0, "Tokyo is UTC+9");
         sky.set_city_time(false, 100.0);
         assert!((offset_at(&sky, 100.0) - 540.0).abs() < 1e-9, "and back from where they stood");
-        assert_eq!(offset_at(&sky, 100.0 + NEAR_SECS), pc);
+        assert_eq!(offset_at(&sky, 100.0 + CLOCK_SECS), pc);
+    }
+
+    #[test]
+    fn on_the_citys_time_the_hands_slide_over_the_whole_trip() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_city_time(true, 0.0);
+        let pc = offset_at(&sky, 10.0);
+        sky.set_place((35.7, 139.7), "Asia/Tokyo", 10.0);
+        let secs = trip_secs(sun::step((0.0, 0.0), (35.7, 139.7)).0);
+        assert!((offset_at(&sky, 10.0 + secs / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway there, half the way round");
+        assert_eq!(offset_at(&sky, 10.0 + secs), 540.0);
     }
 
     #[test]

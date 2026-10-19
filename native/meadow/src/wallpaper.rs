@@ -7,7 +7,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use meadow_core::frame_pacer::FPS_CAPS;
-use meadow_core::settings::{PIXEL_SIZES, Setting, Settings};
+use meadow_core::label;
+use meadow_core::settings::{PIXEL_SIZES, Setting, Settings, Speed, Unit};
 use meadow_core::sky::Fog;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -90,13 +91,15 @@ struct Tray {
 impl Tray {
     fn new(settings: &Settings, city: Option<&str>) -> Self {
         let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
-        let groups: [(&str, Vec<(String, Setting)>); 6] = [
+        let groups: [(&str, Vec<(String, Setting)>); 8] = [
             ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
             ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
             ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
             ("Giờ đồng hồ", vec![("Giờ máy tính".into(), Setting::CityTime(false)), ("Giờ thành phố".into(), Setting::CityTime(true))]),
             ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
             ("Màn hình", vec![("Tất cả màn hình".into(), Setting::AllScreens(true)), ("Chỉ màn hình chính".into(), Setting::AllScreens(false))]),
+            ("Tốc độ bay", Speed::ALL.map(|speed| (speed_label(speed, settings.unit), Setting::Speed(speed))).to_vec()),
+            ("Đơn vị", [("Mét", Unit::M), ("Kilômét", Unit::Km), ("Dặm", Unit::Mi)].map(|(l, u)| (l.into(), Setting::Unit(u))).to_vec()),
         ];
         let menu = Menu::new();
         let mut choices = Vec::new();
@@ -144,9 +147,19 @@ impl Tray {
             if std::mem::discriminant(setting) == std::mem::discriminant(&chosen) {
                 item.set_checked(*setting == chosen);
             }
+            // The speeds read in the chosen unit.
+            if let (Setting::Speed(speed), Setting::Unit(unit)) = (setting, chosen) {
+                item.set_text(speed_label(*speed, unit));
+            }
         }
         Some(TrayAction::Set(chosen))
     }
+}
+
+/// A travel speed in the tray, e.g. "Siêu thanh · 1 km/s".
+fn speed_label(speed: Speed, unit: Unit) -> String {
+    let name = ["Máy bay", "Siêu thanh", "Tên lửa", "Vệ tinh", "Sao băng", "Ánh sáng"][speed as usize];
+    format!("{name} · {}", label::speed(speed.km_s(), unit))
 }
 
 /// A monitor's handle and rectangle (physical px: the process is per-monitor DPI aware).
@@ -234,6 +247,18 @@ impl Desktop {
         });
         let id = id_rx.recv().expect("tray thread");
         self.tray = Some(TrayThread { id, city: city_tx, join: Some(join) });
+    }
+
+    /// Screen px the taskbar takes at the left and the bottom of the primary monitor, if our
+    /// windows cover it: the ETA keeps clear of them.
+    pub fn label_inset(&self) -> (u32, u32) {
+        let Some(primary) = self.monitors.first() else { return (0, 0) };
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..unsafe { std::mem::zeroed() } };
+        if unsafe { GetMonitorInfoW(primary.handle, &mut info) } == 0 || info.dwFlags & MONITORINFOF_PRIMARY == 0 {
+            return (0, 0);
+        }
+        let (m, w) = (info.rcMonitor, info.rcWork);
+        ((w.left - m.left).max(0) as u32, (m.bottom - w.bottom).max(0) as u32)
     }
 
     pub fn set_city(&self, name: &str) {

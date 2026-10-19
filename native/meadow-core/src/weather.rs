@@ -1,7 +1,9 @@
-//! Real weather from Open-Meteo (free, no key): the city search's places and a place's current
-//! cloud cover, wind, visibility and rain. Only the URLs and the parsing live here; the HTTP is the exe's.
+//! Real weather from Open-Meteo (free, no key): the city search's places and the current cloud
+//! cover, wind, visibility and rain at a place, or at points along a trip. Only the URLs and the
+//! parsing live here; the HTTP is the exe's.
 use std::f64::consts::FRAC_PI_2;
 
+use crate::sun;
 use crate::world::{lerp, smoothstep};
 
 pub const SEARCH_HOST: &str = "geocoding-api.open-meteo.com";
@@ -38,6 +40,17 @@ impl Weather {
             gust_kmh: lerp(a.gust_kmh, b.gust_kmh, f),
             visibility_m: lerp(a.visibility_m, b.visibility_m, f),
             code: if f < 0.5 { a.code } else { b.code },
+        }
+    }
+
+    /// The weather a share `f` (0-1) of the way along `route`, its evenly spaced points' weather
+    /// mixed between the two either side.
+    pub fn along(route: &[Weather], f: f64) -> Weather {
+        let x = f.clamp(0.0, 1.0) * (route.len() - 1) as f64;
+        let i = (x as usize).min(route.len().saturating_sub(2));
+        match route.get(i + 1) {
+            Some(next) => Weather::mix(&route[i], next, x - i as f64),
+            None => route[0],
         }
     }
 
@@ -85,9 +98,24 @@ pub fn search_path(name: &str) -> String {
     format!("/v1/search?name={}&count=10&language=vi&format=json", encode(name.trim()))
 }
 
-/// Path and query for the current weather at `place` (lat, lon).
-pub fn current_path((lat, lon): (f64, f64)) -> String {
-    format!("/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code")
+const ROUTE_KM: f64 = 25.0; // a trip's weather is fetched about this far apart...
+const ROUTE_POINTS: usize = 100; // ...at most at this many points, ends included
+
+/// The points (lat, lon) along the great circle from `from` to `to`, ends included, whose weather
+/// a trip passes through: just `to` if they're the same place.
+pub fn route(from: (f64, f64), to: (f64, f64)) -> Vec<(f64, f64)> {
+    let (km, _) = sun::step(from, to);
+    let legs = ((km / ROUTE_KM).ceil() as usize).min(ROUTE_POINTS - 1);
+    if legs == 0 {
+        return vec![to];
+    }
+    (0..=legs).map(|i| sun::great_circle(from, to, i as f64 / legs as f64)).collect()
+}
+
+/// Path and query for the current weather at `points` (lat, lon), all in one request.
+pub fn current_path(points: &[(f64, f64)]) -> String {
+    let list = |f: fn(&(f64, f64)) -> f64| points.iter().map(|p| format!("{:.4}", f(p))).collect::<Vec<_>>().join(",");
+    format!("/v1/forecast?latitude={}&longitude={}&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code", list(|p| p.0), list(|p| p.1))
 }
 
 // Percent-encoding of everything but unreserved bytes, so a UTF-8 name like "Hà Nội" passes.
@@ -114,9 +142,16 @@ pub fn parse_search(body: &str) -> Result<Vec<City>, String> {
         .collect())
 }
 
-pub fn parse_current(body: &str) -> Result<Weather, String> {
-    let root = Json::parse(body)?;
-    let current = root.get("current").ok_or("no \"current\" in the reply")?;
+/// The current weather at each point asked for: one place's reply is an object, more's a list.
+pub fn parse_current(body: &str) -> Result<Vec<Weather>, String> {
+    match Json::parse(body)? {
+        Json::Arr(places) => places.iter().map(current).collect(),
+        place => Ok(vec![current(&place)?]),
+    }
+}
+
+fn current(place: &Json) -> Result<Weather, String> {
+    let current = place.get("current").ok_or("no \"current\" in the reply")?;
     let field = |k: &str| current.get(k).and_then(Json::num).ok_or(format!("no current {k}"));
     Ok(Weather {
         cover: (field("cloud_cover")? / 100.0).clamp(0.0, 1.0),
@@ -313,7 +348,11 @@ pub(crate) mod tests {
 
     #[test]
     fn reads_the_current_weather() {
-        assert_eq!(parse_current(CURRENT), Ok(Weather { cover: 0.75, wind_from: 135.0, wind_kmh: 8.6, gust_kmh: 19.8, visibility_m: 24140.0, code: 3 }));
+        let here = Weather { cover: 0.75, wind_from: 135.0, wind_kmh: 8.6, gust_kmh: 19.8, visibility_m: 24140.0, code: 3 };
+        assert_eq!(parse_current(CURRENT), Ok(vec![here]));
+        let other = CURRENT.replace("\"cloud_cover\":75", "\"cloud_cover\":20");
+        assert_eq!(parse_current(&format!("[{CURRENT},{other}]")), Ok(vec![here, Weather { cover: 0.2, ..here }]), "several places: a list");
+        assert!(parse_current(&format!("[{CURRENT},{{}}]")).is_err());
         assert!(parse_current(r#"{"current":{"cloud_cover":10}}"#).is_err());
         assert!(parse_current(r#"{"error":true,"reason":"Latitude must be in range"}"#).is_err());
     }
@@ -321,7 +360,30 @@ pub(crate) mod tests {
     #[test]
     fn urls_are_encoded() {
         assert_eq!(search_path(" Hà Nội "), "/v1/search?name=H%C3%A0%20N%E1%BB%99i&count=10&language=vi&format=json");
-        assert_eq!(current_path((21.0245, 105.84117)), "/v1/forecast?latitude=21.0245&longitude=105.8412&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code");
+        assert_eq!(current_path(&[(21.0245, 105.84117)]), "/v1/forecast?latitude=21.0245&longitude=105.8412&current=cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code");
+        assert!(current_path(&[(16.0, 108.2), (-12.5, 108.05)]).starts_with("/v1/forecast?latitude=16.0000,-12.5000&longitude=108.2000,108.0500&current="));
+    }
+
+    #[test]
+    fn a_trip_is_sampled_every_25_km_up_to_100_points() {
+        let (danang, bmt, london) = ((16.0544, 108.2022), (12.6667, 108.05), (51.5074, -0.1278));
+        let r = route(danang, bmt); // about 380 km
+        assert_eq!(r.len(), 17);
+        let near = |a: (f64, f64), b: (f64, f64)| sun::step(a, b).0 < 1e-6;
+        assert!(near(r[0], danang) && near(r[16], bmt), "from end to end: {:?} {:?}", r[0], r[16]);
+        let legs: Vec<f64> = r.windows(2).map(|w| sun::step(w[0], w[1]).0).collect();
+        assert!(legs.iter().all(|&km| (km - legs[0]).abs() < 0.01 && km <= ROUTE_KM), "evenly, at most 25 km: {legs:?}");
+        assert_eq!(route(danang, london).len(), ROUTE_POINTS, "a long haul is capped");
+        assert_eq!(route(danang, danang), vec![danang], "no trip: just the place");
+    }
+
+    #[test]
+    fn the_weather_along_a_trip_mixes_its_nearest_points() {
+        let route = [0.0, 0.5, 1.0].map(|cover| Weather { cover, ..CLEAR });
+        let at = |f| Weather::along(&route, f).cover;
+        assert_eq!([at(0.0), at(0.25), at(0.5), at(1.0)], [0.0, 0.25, 0.5, 1.0]);
+        assert_eq!((at(-1.0), at(2.0)), (0.0, 1.0), "clamped to the ends");
+        assert_eq!(Weather::along(&route[..1], 0.7), route[0], "a single point");
     }
 
     pub const CLEAR: Weather = Weather { cover: 0.0, wind_from: 0.0, wind_kmh: 10.0, gust_kmh: 10.0, visibility_m: 24000.0, code: 0 };

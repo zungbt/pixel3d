@@ -7,6 +7,50 @@ use crate::weather::City;
 
 pub const PIXEL_SIZES: [u32; 3] = [2, 3, 4]; // screen px per art pixel
 
+/// How fast the sky travels to a newly chosen city.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Speed {
+    Plane,
+    Supersonic,
+    Rocket,
+    Satellite,
+    Meteor,
+    Light,
+}
+
+impl Speed {
+    pub const ALL: [Speed; 6] = [Speed::Plane, Speed::Supersonic, Speed::Rocket, Speed::Satellite, Speed::Meteor, Speed::Light];
+
+    pub fn km_s(self) -> f64 {
+        [0.25, 1.0, 5.0, 7.7, 40.0, 299_792.458][self as usize]
+    }
+
+    fn key(self) -> &'static str {
+        ["plane", "supersonic", "rocket", "satellite", "meteor", "light"][self as usize]
+    }
+}
+
+/// What distances and speeds are shown in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Unit {
+    M,
+    Km,
+    Mi,
+}
+
+impl Unit {
+    pub const ALL: [Unit; 3] = [Unit::M, Unit::Km, Unit::Mi];
+
+    /// `km` in this unit.
+    pub fn of(self, km: f64) -> f64 {
+        km * [1000.0, 1.0, 1.0 / 1.609_344][self as usize]
+    }
+
+    pub fn symbol(self) -> &'static str {
+        ["m", "km", "mi"][self as usize]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub pixel_size: u32,
@@ -17,6 +61,8 @@ pub struct Settings {
     pub broken_at: Option<i64>, // unix s the post clock was turned off (its pieces' age)
     pub all_screens: bool, // wallpaper: the meadow runs across every monitor; false: the primary only
     pub city_time: bool,  // the post clock shows the chosen city's local time; false: the PC's
+    pub speed: Speed,
+    pub unit: Unit,
 }
 
 /// One changed setting, as the tray menu sends it.
@@ -30,6 +76,8 @@ pub enum Setting {
     BrokenAt(i64),
     AllScreens(bool),
     CityTime(bool),
+    Speed(Speed),
+    Unit(Unit),
 }
 
 // The value of `key` in settings.txt's text: its first line that isn't a comment.
@@ -60,6 +108,8 @@ impl Settings {
             broken_at: get("brokenAt").and_then(|v| v.parse().ok()),
             all_screens: get("screens") != Some("primary"),
             city_time: get("clockZone") == Some("city"),
+            speed: Speed::ALL.into_iter().find(|s| get("travelSpeed") == Some(s.key())).unwrap_or(Speed::Supersonic),
+            unit: Unit::ALL.into_iter().find(|u| get("unit") == Some(u.symbol())).unwrap_or(Unit::Km),
         }
     }
 
@@ -73,6 +123,8 @@ impl Settings {
             Setting::BrokenAt(t) => self.broken_at = Some(t),
             Setting::AllScreens(on) => self.all_screens = on,
             Setting::CityTime(on) => self.city_time = on,
+            Setting::Speed(speed) => self.speed = speed,
+            Setting::Unit(unit) => self.unit = unit,
         }
     }
 }
@@ -88,6 +140,8 @@ impl Setting {
             Setting::BrokenAt(t) => ("brokenAt", t.to_string()),
             Setting::AllScreens(on) => ("screens", if on { "all" } else { "primary" }.to_string()),
             Setting::CityTime(on) => ("clockZone", if on { "city" } else { "local" }.to_string()),
+            Setting::Speed(speed) => ("travelSpeed", speed.key().to_string()),
+            Setting::Unit(unit) => ("unit", unit.symbol().to_string()),
         }
     }
 }
@@ -137,7 +191,7 @@ fn put(text: &str, key: &str, value: &str) -> String {
 mod tests {
     use super::*;
 
-    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None, all_screens: true, city_time: false };
+    const DEFAULTS: Settings = Settings { pixel_size: 3, fps: Some(15), clock: true, fog: Fog::Auto, show_clock: true, broken_at: None, all_screens: true, city_time: false, speed: Speed::Supersonic, unit: Unit::Km };
 
     #[test]
     fn an_empty_file_gives_the_defaults() {
@@ -147,19 +201,32 @@ mod tests {
 
     #[test]
     fn unexpected_stored_values_fall_back() {
-        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\nscreens = 2\nclockZone = utc\n";
+        let text = "pixelSize = 5\nfps = 45\nclock = yes\nshowClock = 0\nfog = thick\nbrokenAt = soon\nscreens = 2\nclockZone = utc\ntravelSpeed = warp\nunit = ft\n";
         assert_eq!(Settings::load(text), DEFAULTS);
     }
 
     #[test]
     fn saved_values_load_back() {
-        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000), Setting::AllScreens(false), Setting::CityTime(true)];
+        let changes = [Setting::PixelSize(4), Setting::Fps(Some(30)), Setting::Clock(false), Setting::Fog(Fog::Off), Setting::ShowClock(false), Setting::BrokenAt(1_800_000_000), Setting::AllScreens(false), Setting::CityTime(true), Setting::Speed(Speed::Rocket), Setting::Unit(Unit::Mi)];
         let text = changes.iter().fold(String::new(), |text, &s| save(&text, s));
-        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000), all_screens: false, city_time: true });
+        assert_eq!(Settings::load(&text), Settings { pixel_size: 4, fps: Some(30), clock: false, fog: Fog::Off, show_clock: false, broken_at: Some(1_800_000_000), all_screens: false, city_time: true, speed: Speed::Rocket, unit: Unit::Mi });
         let mut set = DEFAULTS;
         changes.iter().for_each(|&s| set.set(s));
         assert_eq!(set, Settings::load(&text), "set agrees with save + load");
         assert_eq!(Settings::load(&save(&text, Setting::Fog(Fog::Always))).fog, Fog::Always);
+        for speed in Speed::ALL {
+            assert_eq!(Settings::load(&save(&text, Setting::Speed(speed))).speed, speed);
+        }
+        for unit in Unit::ALL {
+            assert_eq!(Settings::load(&save(&text, Setting::Unit(unit))).unit, unit);
+        }
+    }
+
+    #[test]
+    fn units_convert_from_km() {
+        assert_eq!(Unit::M.of(0.25), 250.0);
+        assert_eq!(Unit::Km.of(380.0), 380.0);
+        assert!((Unit::Mi.of(1.609_344) - 1.0).abs() < 1e-12);
     }
 
     #[test]
