@@ -26,14 +26,8 @@ function wingsGeometry(side) {
   return mergeGeometries(wings);
 }
 
-// Day: each one holds a stretch of the pond rim, patrolling it in fast straight darts with
-// hovers between, perching on a shore rock (or the rim) now and then, and chasing off any
-// rival that comes within a body length or so. Around dusk and dawn it hawks through the midge
-// swarms over its stretch. Before each straight flight it pivots in the air, then shoots off.
-// At dusk it drops into the grass near the shore.
-// A couple of roamers do the same over the open meadow instead: darts between clear spots near
-// where they are, rests on grass tips, and the night in the grass wherever they end up.
-export function buildDragonflies(scene, ctx) {
+// One group per dragonfly: shared body and wing geometry and wing material, body tinted per colour.
+function spawnFlies(scene, ctx) {
   const gradientMap = ctx.world.gradientMap;
   const shoreRocks = ctx.world.rocks.filter((r) => pondEdge(r.position.x, r.position.z) < 2.5);
 
@@ -72,8 +66,15 @@ export function buildDragonflies(scene, ctx) {
       yawVel: 0,
     };
   });
-  ctx.hunters.push(...flies);
 
+  ctx.hunters.push(...flies);
+  return flies;
+}
+
+// The flight behaviour for every dragonfly, rim and roamers alike. Each helper mutates the single dragonfly `d`
+// it is given (and its d.target) and nothing else, so the state machine below can be read
+// top-to-bottom without reaching into geometry or material code.
+function createFlight(ctx) {
   const territoryAngle = (d) => d.home + (d.rand() * 2 - 1) * SECTOR;
 
   // Open meadow at height y over the ground: in view, off the water, clear of trees and rocks.
@@ -83,6 +84,7 @@ export function buildDragonflies(scene, ctx) {
     _p.set(x, heightAt(x, z) + y, z);
     return !ctx.obstacles.some((o) => o.c.distanceTo(_p) < o.r + 0.3);
   }
+
   // A roamer's next spot near where it is, y over the ground, with a clear straight flight there.
   // `out` is only written when one is found.
   function meadowSpot(d, out, y) {
@@ -177,9 +179,9 @@ export function buildDragonflies(scene, ctx) {
     return true;
   }
 
+  // Holds station with tiny corrections.
   const _aim = new THREE.Vector3();
   function hoverStep(d, dt) {
-    // Holds station with tiny corrections.
     _aim.set(
       d.target.x + (d.rand() - 0.5) * 0.1,
       d.target.y + (d.rand() - 0.5) * 0.06,
@@ -190,94 +192,119 @@ export function buildDragonflies(scene, ctx) {
     d.pos.addScaledVector(d.vel, dt);
   }
 
-  const flying = (d) => d.state !== 'perch' && d.state !== 'settle';
-  const straight = (d) => d.state === 'dart' || d.state === 'toPerch' || d.state === 'toSettle';
+  return { clearAt, dart, hunt, preyFor, toPerch, toSettle, hover, flyTo, hoverStep };
+}
 
+const flying = (d) => d.state !== 'perch' && d.state !== 'settle';
+const straight = (d) => d.state === 'dart' || d.state === 'toPerch' || d.state === 'toSettle';
+const patrolling = (d) => d.state === 'dart' || d.state === 'hover';
+
+// The per-dragonfly state machine: dawn/dusk transitions, then fly whatever state it is in.
+function stepState(flies, flight, sky, dt) {
+  for (const d of flies) {
+    const dark = sky.daylight < d.threshold;
+    if (d.state === null) {
+      // First frame: start wherever this time of day would have left it.
+      if (d.home === null) {
+        do d.pos.set((d.rand() * 2 - 1) * 11, 0, (d.rand() * 2 - 1) * 11);
+        while (!flight.clearAt(d.pos.x, d.pos.z, 0.6));
+      }
+      if (dark) {
+        flight.toSettle(d);
+        d.pos.copy(d.target);
+        d.state = 'settle';
+      } else {
+        flight.dart(d);
+        d.pos.copy(d.target);
+        flight.hover(d);
+      }
+    }
+
+    if (d.state === 'settle') {
+      if (sky.daylight > d.threshold + 0.05) flight.dart(d);
+    } else if (dark && d.state !== 'toSettle') {
+      flight.toSettle(d);
+    }
+
+    d.cooldown -= dt;
+    switch (d.state) {
+      case 'dart':
+        if (flight.flyTo(d, dt) || d.timer <= 0) flight.hover(d);
+        break;
+      case 'hover':
+        flight.hoverStep(d, dt);
+        if ((d.timer -= dt) <= 0) {
+          const prey = flight.preyFor(d);
+          const huntChance = prey ? HUNT : 0;
+          const next = pick(d.rand, { dart: 1 - d.perchChance - huntChance, perch: d.perchChance, hunt: huntChance });
+          if (next === 'perch') flight.toPerch(d);
+          else if (next === 'hunt') flight.hunt(d, prey);
+          else flight.dart(d);
+        }
+        break;
+      case 'toPerch':
+        if (flight.flyTo(d, dt)) (d.state = 'perch'), (d.timer = 3 + d.rand() * 7);
+        else if (d.timer <= 0) flight.dart(d);
+        break;
+      case 'perch':
+        if ((d.timer -= dt) <= 0) flight.dart(d);
+        break;
+      case 'toSettle':
+        if (flight.flyTo(d, dt)) d.state = 'settle';
+        else if (d.timer <= 0) flight.toSettle(d);
+        break;
+    }
+  }
+}
+
+// Rivals that meet in the air both dart off.
+function stepRivals(flies, flight) {
+  for (let i = 0; i < flies.length; i++) {
+    for (let j = i + 1; j < flies.length; j++) {
+      const a = flies[i];
+      const b = flies[j];
+      if (!patrolling(a) || !patrolling(b) || a.cooldown > 0 || b.cooldown > 0) continue;
+      if (a.pos.distanceTo(b.pos) > 1) continue;
+      for (const d of [a, b]) flight.dart(d), (d.cooldown = 1.5);
+    }
+  }
+}
+
+// Copy position to the group, swing the body toward where it is headed, beat the wings.
+function updateVisuals(flies, dt) {
+  for (const d of flies) {
+    d.group.position.copy(d.pos);
+    // The body swings round on a spring (at most 10 rad/s): toward the target on a straight
+    // flight, along its drift in a hover, and stays put at rest.
+    if (straight(d)) turn(d, Math.atan2(d.target.x - d.pos.x, d.target.z - d.pos.z), dt, 60, 14, 10);
+    else if (d.state === 'hover' && d.vel.lengthSq() > 0.09) turn(d, Math.atan2(d.vel.x, d.vel.z), dt, 60, 14, 10);
+    d.group.rotation.y = d.yaw;
+    // Wings beat too fast to see: alternate up/down every frame in flight, flat out at rest.
+    let wing = 0;
+    if (flying(d)) {
+      d.flick = !d.flick;
+      wing = d.flick ? FLICK : -FLICK;
+    }
+    d.left.rotation.z = -wing;
+    d.right.rotation.z = wing;
+  }
+}
+
+// Day: each one holds a stretch of the pond rim, patrolling it in fast straight darts with
+// hovers between, perching on a shore rock (or the rim) now and then, and chasing off any
+// rival that comes within a body length or so. Around dusk and dawn it hawks through the midge
+// swarms over its stretch. Before each straight flight it pivots in the air, then shoots off.
+// At dusk it drops into the grass near the shore.
+// A couple of roamers do the same over the open meadow instead: darts between clear spots near
+// where they are, rests on grass tips, and the night in the grass wherever they end up.
+export function buildDragonflies(scene, ctx) {
+  const flies = spawnFlies(scene, ctx);
+  const flight = createFlight(ctx);
   return {
     update(t, dt, sky) {
-      for (const d of flies) {
-        const dark = sky.daylight < d.threshold;
-        if (d.state === null) {
-          // First frame: start wherever this time of day would have left it.
-          if (d.home === null) {
-            do d.pos.set((d.rand() * 2 - 1) * 11, 0, (d.rand() * 2 - 1) * 11);
-            while (!clearAt(d.pos.x, d.pos.z, 0.6));
-          }
-          if (dark) {
-            toSettle(d);
-            d.pos.copy(d.target);
-            d.state = 'settle';
-          } else {
-            dart(d);
-            d.pos.copy(d.target);
-            hover(d);
-          }
-        }
-
-        if (d.state === 'settle') {
-          if (sky.daylight > d.threshold + 0.05) dart(d);
-        } else if (dark && d.state !== 'toSettle') {
-          toSettle(d);
-        }
-
-        d.cooldown -= dt;
-        switch (d.state) {
-          case 'dart':
-            if (flyTo(d, dt) || d.timer <= 0) hover(d);
-            break;
-          case 'hover':
-            hoverStep(d, dt);
-            if ((d.timer -= dt) <= 0) {
-              const prey = preyFor(d);
-              const huntChance = prey ? HUNT : 0;
-              const next = pick(d.rand, { dart: 1 - d.perchChance - huntChance, perch: d.perchChance, hunt: huntChance });
-              if (next === 'perch') toPerch(d);
-              else if (next === 'hunt') hunt(d, prey);
-              else dart(d);
-            }
-            break;
-          case 'toPerch':
-            if (flyTo(d, dt)) (d.state = 'perch'), (d.timer = 3 + d.rand() * 7);
-            else if (d.timer <= 0) dart(d);
-            break;
-          case 'perch':
-            if ((d.timer -= dt) <= 0) dart(d);
-            break;
-          case 'toSettle':
-            if (flyTo(d, dt)) d.state = 'settle';
-            else if (d.timer <= 0) toSettle(d);
-            break;
-        }
-      }
-
-      // Rivals that meet in the air both dart off.
-      for (let i = 0; i < flies.length; i++) {
-        for (let j = i + 1; j < flies.length; j++) {
-          const a = flies[i];
-          const b = flies[j];
-          const patrolling = (d) => d.state === 'dart' || d.state === 'hover';
-          if (!patrolling(a) || !patrolling(b) || a.cooldown > 0 || b.cooldown > 0) continue;
-          if (a.pos.distanceTo(b.pos) > 1) continue;
-          for (const d of [a, b]) dart(d), (d.cooldown = 1.5);
-        }
-      }
-
-      for (const d of flies) {
-        d.group.position.copy(d.pos);
-        // The body swings round on a spring (at most 10 rad/s): toward the target on a straight
-        // flight, along its drift in a hover, and stays put at rest.
-        if (straight(d)) turn(d, Math.atan2(d.target.x - d.pos.x, d.target.z - d.pos.z), dt, 60, 14, 10);
-        else if (d.state === 'hover' && d.vel.lengthSq() > 0.09) turn(d, Math.atan2(d.vel.x, d.vel.z), dt, 60, 14, 10);
-        d.group.rotation.y = d.yaw;
-        // Wings beat too fast to see: alternate up/down every frame in flight, flat out at rest.
-        let wing = 0;
-        if (flying(d)) {
-          d.flick = !d.flick;
-          wing = d.flick ? FLICK : -FLICK;
-        }
-        d.left.rotation.z = -wing;
-        d.right.rotation.z = wing;
-      }
+      stepState(flies, flight, sky, dt);
+      stepRivals(flies, flight);
+      updateVisuals(flies, dt);
     },
   };
 }

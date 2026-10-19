@@ -329,45 +329,59 @@ function placeOnGround(obj, x, z) {
   obj.position.set(x, heightAt(x, z), z);
 }
 
-export function buildWorld(scene) {
-  const rand = mulberry32(42);
-  const gradientMap = toonGradient();
-  const materials = {
+function buildMaterials(gradientMap) {
+  return {
     trunk: new THREE.MeshToonMaterial({ color: 0x8d6d52, gradientMap }),
     leaves: new THREE.MeshToonMaterial({ color: 0x589e63, gradientMap }),
     rock: new THREE.MeshToonMaterial({ color: 0xaaafc2, gradientMap }),
   };
+}
 
+// Ground, sand beach and water. The water mesh is kept so update() can drive its uniforms.
+function buildShore(scene, gradientMap) {
   scene.add(buildGround(gradientMap));
   scene.add(buildPondShape(sandRadius, SHORE_Y + 0.01, new THREE.MeshToonMaterial({ color: 0xecd8b8, gradientMap })));
   const water = buildPondShape(pondRadius, SHORE_Y + 0.02, waterMaterial(gradientMap));
   scene.add(water);
+  return water;
+}
 
-  const spread = () => (rand() - 0.5) * (SIZE - 3);
-  const tooClose = (x, z, minDist) =>
-    trees.some((t) => Math.hypot(t.position.x - x, t.position.z - z) < minDist);
+function spreadFrom(rand) {
+  return () => (rand() - 0.5) * (SIZE - 3);
+}
 
-  // Trees: groves where the forest mask is high, rare loners in clearings,
-  // and a minimum spacing between trunks (dart throwing ≈ Poisson-disk).
+function tooClose(trees, x, z, minDist) {
+  return trees.some((t) => Math.hypot(t.position.x - x, t.position.z - z) < minDist);
+}
+
+// Trees: groves where the forest mask is high, rare loners in clearings,
+// and a minimum spacing between trunks (dart throwing ≈ Poisson-disk).
+function scatterTrees(rand, materials) {
+  const spread = spreadFrom(rand);
   const trees = [];
   for (let attempt = 0; attempt < 4000 && trees.length < 120; attempt++) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || mainPathEdge(x, z) < 1) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(trees, x, z, 1.6) || sandQ(x, z) < 1.15 || mainPathEdge(x, z) < 1) continue;
     const tree = buildTree(rand, materials);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
     trees.push(tree);
   }
+  return trees;
+}
 
-  // Rocks: clusters of one boulder plus a few small stones, favouring slopes, never inside a tree.
-  // The centre check uses the largest boulder radius, so every counted cluster keeps its boulder.
+// Rocks: clusters of one boulder plus a few small stones, favouring slopes, never inside a tree.
+// The centre check uses the largest boulder radius, so every counted cluster keeps its boulder.
+// Note `tooClose` checks trees only — rocks may touch each other, just not trunks.
+function scatterRocks(rand, materials, trees) {
+  const spread = spreadFrom(rand);
   const rocks = [];
   for (let clusters = 0, attempt = 0; clusters < 12 && attempt < 500; attempt++) {
     const cx = spread();
     const cz = spread();
-    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || mainPathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
+    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(trees, cx, cz, 1.5) || mainPathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
     clusters++;
     const stones = [[cx, cz, 0.6 + rand() * 0.3]];
     const small = 2 + Math.floor(rand() * 4);
@@ -377,15 +391,18 @@ export function buildWorld(scene) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || mainPathEdge(x, z) < r + 0.15) continue;
+      if (tooClose(trees, x, z, 0.7) || pondEdge(x, z) < r || mainPathEdge(x, z) < r + 0.15) continue;
       const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
       rocks.push(rock);
     }
   }
+  return rocks;
+}
 
-  // Trees and rocks stay plain objects (insects, flowers and grass read their positions) but are
-  // drawn as three instanced meshes: one draw call per pass each instead of ~300 in all.
+// Trees and rocks stay plain objects (insects, flowers and grass read their positions) but are
+// drawn as three instanced meshes: one draw call per pass each instead of ~300 in all.
+function instancedProps(scene, materials, trees, rocks) {
   const instanced = (geo, material, parts) => {
     const mesh = new THREE.InstancedMesh(geo, material, parts.length);
     parts.forEach((part, i) => {
@@ -400,6 +417,33 @@ export function buildWorld(scene) {
   const trunks = instanced(TRUNK_GEO, materials.trunk, trees.map((t) => t.children[0]));
   const crowns = instanced(LEAVES_GEO, materials.leaves, trees.map((t) => t.children[1]));
   instanced(ROCK_GEO, materials.rock, rocks);
+  return { trunks, crowns };
+}
+
+// Trees sway on a spring; their instance matrices follow.
+function swayTrees(trees, trunks, crowns, t) {
+  // Group origin sits on the ground, so the tree pivots at its base.
+  trees.forEach((tree, i) => {
+    const p = tree.userData.phase;
+    tree.rotation.z = 0.035 * Math.sin(t * 1.3 + p);
+    tree.rotation.x = 0.02 * Math.sin(t * 0.9 + p * 1.7);
+    tree.updateMatrixWorld();
+    trunks.setMatrixAt(i, tree.children[0].matrixWorld);
+    crowns.setMatrixAt(i, tree.children[1].matrixWorld);
+  });
+  trunks.instanceMatrix.needsUpdate = true;
+  crowns.instanceMatrix.needsUpdate = true;
+}
+
+export function buildWorld(scene) {
+  const rand = mulberry32(42);
+  const gradientMap = toonGradient();
+  const materials = buildMaterials(gradientMap);
+
+  const water = buildShore(scene, gradientMap);
+  const trees = scatterTrees(rand, materials);
+  const rocks = scatterRocks(rand, materials, trees);
+  const { trunks, crowns } = instancedProps(scene, materials, trees, rocks);
 
   return {
     trees,
@@ -409,17 +453,7 @@ export function buildWorld(scene) {
       // Water picks up a hint of the sky colour (sky.update runs after this, so it lags one frame).
       water.material.color.set(0xffffff).lerp(scene.background, 0.1);
       waterUniforms.uWaterTime.value = t;
-      // Group origin sits on the ground, so the tree pivots at its base.
-      trees.forEach((tree, i) => {
-        const p = tree.userData.phase;
-        tree.rotation.z = 0.035 * Math.sin(t * 1.3 + p);
-        tree.rotation.x = 0.02 * Math.sin(t * 0.9 + p * 1.7);
-        tree.updateMatrixWorld();
-        trunks.setMatrixAt(i, tree.children[0].matrixWorld);
-        crowns.setMatrixAt(i, tree.children[1].matrixWorld);
-      });
-      trunks.instanceMatrix.needsUpdate = true;
-      crowns.instanceMatrix.needsUpdate = true;
+      swayTrees(trees, trunks, crowns, t);
     },
   };
 }
