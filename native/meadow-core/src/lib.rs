@@ -10,6 +10,7 @@ pub mod frame_pacer;
 pub mod frog;
 pub mod gnats;
 pub mod grass;
+pub mod label;
 pub mod motion;
 pub mod rain;
 pub mod rng;
