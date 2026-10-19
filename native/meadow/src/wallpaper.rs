@@ -2,6 +2,8 @@
 //! the primary's only), each pausing while a maximised or fullscreen window hides it, and a tray
 //! icon offers the settings, the city search, autostart and exit.
 use std::ptr::{null, null_mut};
+use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use meadow_core::frame_pacer::FPS_CAPS;
@@ -19,15 +21,17 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    CreateMutexW, GetCurrentProcess, GetCurrentThreadId, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
     ProcessPowerThrottling, SetProcessInformation,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::BOOL;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
 use winit::window::{Window, WindowAttributes};
 
+use crate::UserEvent;
 use crate::render::Screen;
 
 pub const CHECK_EVERY: Duration = Duration::from_secs(1);
@@ -56,6 +60,24 @@ pub enum TrayAction {
     City, // open the city search
 }
 
+// The tray lives on its own thread: an open menu runs a modal loop (TrackPopupMenu) on the thread
+// that owns the icon, which on the event loop's thread would stop the meadow until it closed.
+struct TrayThread {
+    id: u32,              // for PostThreadMessageW
+    city: Sender<String>, // a new city name for the menu, then a WM_APP to wake the thread
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for TrayThread {
+    // Lets the thread drop the icon (taking it off the taskbar) before the process ends.
+    fn drop(&mut self) {
+        unsafe { PostThreadMessageW(self.id, WM_QUIT, 0, 0) };
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 struct Tray {
     _icon: TrayIcon,
     choices: Vec<(CheckMenuItem, Setting)>, // one checked per kind of setting, like radio buttons
@@ -63,6 +85,68 @@ struct Tray {
     show_clock: CheckMenuItem,
     autostart: CheckMenuItem,
     exit: MenuItem,
+}
+
+impl Tray {
+    fn new(settings: &Settings, city: Option<&str>) -> Self {
+        let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
+        let groups: [(&str, Vec<(String, Setting)>); 6] = [
+            ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
+            ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
+            ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
+            ("Giờ đồng hồ", vec![("Giờ máy tính".into(), Setting::CityTime(false)), ("Giờ thành phố".into(), Setting::CityTime(true))]),
+            ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
+            ("Màn hình", vec![("Tất cả màn hình".into(), Setting::AllScreens(true)), ("Chỉ màn hình chính".into(), Setting::AllScreens(false))]),
+        ];
+        let menu = Menu::new();
+        let mut choices = Vec::new();
+        for (title, group) in groups {
+            // Checked if choosing it would change nothing.
+            let items: Vec<_> = group
+                .into_iter()
+                .map(|(label, setting)| {
+                    let mut chosen = *settings;
+                    chosen.set(setting);
+                    (CheckMenuItem::new(label, true, chosen == *settings, None), setting)
+                })
+                .collect();
+            let refs: Vec<&dyn IsMenuItem> = items.iter().map(|(item, _)| item as &dyn IsMenuItem).collect();
+            menu.append(&Submenu::with_items(title, true, &refs).expect("tray submenu")).expect("tray menu");
+            choices.extend(items);
+        }
+        let city = MenuItem::new(city_label(city), true, None);
+        let show_clock = CheckMenuItem::new("Hiện đồng hồ", true, settings.show_clock, None);
+        let autostart = CheckMenuItem::new("Chạy cùng Windows", true, autostart_enabled(), None);
+        let exit = MenuItem::new("Thoát", true, None);
+        menu.append_items(&[&city, &show_clock, &PredefinedMenuItem::separator(), &autostart, &exit]).expect("tray menu");
+        let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("pixel3d meadow").with_icon(icon()).build().expect("tray icon");
+        Tray { _icon: icon, choices, city, show_clock, autostart, exit }
+    }
+
+    /// Handles a tray menu click.
+    fn menu(&self, event: &MenuEvent) -> Option<TrayAction> {
+        if event.id == *self.autostart.id() {
+            set_autostart(self.autostart.is_checked());
+            return None;
+        }
+        if event.id == *self.exit.id() {
+            return Some(TrayAction::Exit);
+        }
+        if event.id == *self.city.id() {
+            return Some(TrayAction::City);
+        }
+        if event.id == *self.show_clock.id() {
+            return Some(TrayAction::Set(Setting::ShowClock(self.show_clock.is_checked())));
+        }
+        // A click toggles its check: put the whole group right, this one checked even if it was.
+        let &(_, chosen) = self.choices.iter().find(|(item, _)| event.id == *item.id())?;
+        for (item, setting) in &self.choices {
+            if std::mem::discriminant(setting) == std::mem::discriminant(&chosen) {
+                item.set_checked(*setting == chosen);
+            }
+        }
+        Some(TrayAction::Set(chosen))
+    }
 }
 
 /// A monitor's handle and rectangle (physical px: the process is per-monitor DPI aware).
@@ -107,7 +191,7 @@ unsafe extern "system" fn add_monitor(handle: HMONITOR, _: HDC, _: *mut RECT, ou
 pub struct Desktop {
     host: HWND, // our windows' parent behind the icons, over the monitors they cover; null until attached
     monitors: Vec<Monitor>, // the ones our windows cover, the primary first
-    tray: Option<Tray>,
+    tray: Option<TrayThread>,
     since: Instant, // when we started looking for the desktop
     pub next_check: Instant,
     pub fallback: bool, // gave up on the desktop: a normal window
@@ -119,75 +203,44 @@ impl Desktop {
         Desktop { host: null_mut(), monitors: Vec::new(), tray: None, since: now, next_check: now, fallback: false }
     }
 
-    /// Call once the event loop runs (the tray needs its message pump).
-    pub fn show_tray(&mut self, settings: &Settings, city: Option<&str>) {
+    /// Puts the tray icon up, on its own thread; its clicks come back through `proxy`.
+    pub fn show_tray(&mut self, settings: &Settings, city: Option<&str>, proxy: EventLoopProxy<UserEvent>) {
         if self.tray.is_some() {
             return;
         }
-        let fps = |cap: Option<u32>| (cap.map_or("Không giới hạn".into(), |n| format!("{n} fps")), Setting::Fps(cap));
-        let groups: [(&str, Vec<(String, Setting)>); 6] = [
-            ("Cỡ điểm ảnh", PIXEL_SIZES.iter().map(|&n| (format!("{n} px"), Setting::PixelSize(n))).collect()),
-            ("Giới hạn FPS", FPS_CAPS.iter().map(|&n| fps(Some(n))).chain([fps(None)]).collect()),
-            ("Thời gian", vec![("Theo đồng hồ".into(), Setting::Clock(true)), ("Ngày 5 phút".into(), Setting::Clock(false))]),
-            ("Giờ đồng hồ", vec![("Giờ máy tính".into(), Setting::CityTime(false)), ("Giờ thành phố".into(), Setting::CityTime(true))]),
-            ("Sương mù", [("Tắt", Fog::Off), ("Tự động", Fog::Auto), ("Luôn bật", Fog::Always)].map(|(l, f)| (l.into(), Setting::Fog(f))).to_vec()),
-            ("Màn hình", vec![("Tất cả màn hình".into(), Setting::AllScreens(true)), ("Chỉ màn hình chính".into(), Setting::AllScreens(false))]),
-        ];
-        let menu = Menu::new();
-        let mut choices = Vec::new();
-        for (title, group) in groups {
-            // Checked if choosing it would change nothing.
-            let items: Vec<_> = group
-                .into_iter()
-                .map(|(label, setting)| {
-                    let mut chosen = *settings;
-                    chosen.set(setting);
-                    (CheckMenuItem::new(label, true, chosen == *settings, None), setting)
-                })
-                .collect();
-            let refs: Vec<&dyn IsMenuItem> = items.iter().map(|(item, _)| item as &dyn IsMenuItem).collect();
-            menu.append(&Submenu::with_items(title, true, &refs).expect("tray submenu")).expect("tray menu");
-            choices.extend(items);
-        }
-        let city = MenuItem::new(city_label(city), true, None);
-        let show_clock = CheckMenuItem::new("Hiện đồng hồ", true, settings.show_clock, None);
-        let autostart = CheckMenuItem::new("Chạy cùng Windows", true, autostart_enabled(), None);
-        let exit = MenuItem::new("Thoát", true, None);
-        menu.append_items(&[&city, &show_clock, &PredefinedMenuItem::separator(), &autostart, &exit]).expect("tray menu");
-        let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("pixel3d meadow").with_icon(icon()).build().expect("tray icon");
-        self.tray = Some(Tray { _icon: icon, choices, city, show_clock, autostart, exit });
+        let (settings, city) = (*settings, city.map(str::to_string));
+        let (city_tx, city_rx) = mpsc::channel::<String>();
+        let (id_tx, id_rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let tray = Tray::new(&settings, city.as_deref());
+            let _ = id_tx.send(unsafe { GetCurrentThreadId() }); // its message queue exists now
+            let mut msg: MSG = unsafe { std::mem::zeroed() };
+            while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
+                // Woken by WM_APP, but checked on every message: an open menu's loop drops thread messages.
+                while let Ok(name) = city_rx.try_recv() {
+                    tray.city.set_text(city_label(Some(&name)));
+                }
+                unsafe {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                // A click is queued by the icon's window procedure, run just now.
+                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                    if let Some(action) = tray.menu(&event) {
+                        let _ = proxy.send_event(UserEvent::Tray(action));
+                    }
+                }
+            }
+        });
+        let id = id_rx.recv().expect("tray thread");
+        self.tray = Some(TrayThread { id, city: city_tx, join: Some(join) });
     }
 
     pub fn set_city(&self, name: &str) {
         if let Some(tray) = &self.tray {
-            tray.city.set_text(city_label(Some(name)));
+            let _ = tray.city.send(name.to_string());
+            unsafe { PostThreadMessageW(tray.id, WM_APP, 0, 0) };
         }
-    }
-
-    /// Handles a tray menu click.
-    pub fn menu(&self, event: &MenuEvent) -> Option<TrayAction> {
-        let tray = self.tray.as_ref()?;
-        if event.id == *tray.autostart.id() {
-            set_autostart(tray.autostart.is_checked());
-            return None;
-        }
-        if event.id == *tray.exit.id() {
-            return Some(TrayAction::Exit);
-        }
-        if event.id == *tray.city.id() {
-            return Some(TrayAction::City);
-        }
-        if event.id == *tray.show_clock.id() {
-            return Some(TrayAction::Set(Setting::ShowClock(tray.show_clock.is_checked())));
-        }
-        // A click toggles its check: put the whole group right, this one checked even if it was.
-        let &(_, chosen) = tray.choices.iter().find(|(item, _)| event.id == *item.id())?;
-        for (item, setting) in &tray.choices {
-            if std::mem::discriminant(setting) == std::mem::discriminant(&chosen) {
-                item.set_checked(*setting == chosen);
-            }
-        }
-        Some(TrayAction::Set(chosen))
     }
 
     /// False once the desktop (and our window with it) is gone.

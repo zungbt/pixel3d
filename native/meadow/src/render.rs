@@ -392,6 +392,7 @@ pub struct Renderer {
     wind: Wind,
     rain: Rain,
     post_rain: [f32; 4],
+    catch_up: sky::CatchUp,
     frog_draw: Draw,
     pixel_size: u32,
     pub timer: Option<GpuTimer>, // --gpu-time
@@ -877,6 +878,7 @@ impl Renderer {
             wind: Wind::default(),
             rain: Rain::default(),
             post_rain: [0.0; 4],
+            catch_up: sky::CatchUp::default(),
             frog_draw: upload(device, mesh::cube(), &blank(FROG_PARTS), Shade::Toon, true),
             pixel_size,
             timer: None,
@@ -1037,9 +1039,9 @@ impl Renderer {
     pub fn update(&mut self, queue: &wgpu::Queue, time: f64, dt: f64, unix: f64, sky: &SkyState, clock: &ClockPose, weather: Option<&Weather>) {
         self.wind.update(dt, weather);
         self.rain.update(dt, weather);
+        let (sky, cover) = self.catch_up.step(*sky, clouds::cover(unix, sky.elevation, weather), time, unix);
         let lit = sky.daylight;
-        let cover = clouds::cover(unix, sky.elevation, weather);
-        let sky = &self.rain.sky(&clouds::overcast(sky, cover));
+        let sky = &self.rain.sky(&clouds::overcast(&sky, cover));
         self.set_sky(sky);
         self.pose_insects(queue, time, dt, sky);
         self.post_clock.pose(queue, clock, sky, time);
