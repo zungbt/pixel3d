@@ -11,21 +11,29 @@ use meadow_core::weather::Weather;
 use meadow_core::settings;
 use meadow_core::world::{lerp, smoothstep};
 
-// A trip's length and its cloud slide grow with the distance and level off over long hauls: the
-// first 1000 km count most, and the far side of the world is not much longer than half of it.
-const NEAR_SECS: f64 = 3.0; // a hop next door takes this long...
-const FAR_SECS: f64 = 10.0; // ...and the longest haul this
-const FAR_SLIDE: f64 = 40.0; // world units the clouds slide over the longest haul
-const LEVEL_KM: f64 = 3000.0; // distance over which a trip reaches 63% of its way to the longest
+// A trip goes straight there at SPEED, speeding up over RAMP and slowing down over RAMP at the
+// end, the clouds sliding past at CLOUD_PER_KM: Da Nang to Buon Ma Thuot takes some 6 minutes.
+const SPEED: f64 = 1.0; // km/s
+const RAMP: f64 = 2.0; // s
+const CLOUD_PER_KM: f64 = 3.0; // world units (about 2.5 m)
+const CLOCK_SECS: f64 = 3.0; // the post clock's hands take at least this long to slide to a new zone
 
-/// How much of the longest haul a trip of `km` is, 0-1.
-fn haul(km: f64) -> f64 {
-    1.0 - (-km / LEVEL_KM).exp()
+/// How long a trip of `km` takes, s: a hop under RAMP's worth never gets up to speed.
+fn trip_secs(km: f64) -> f64 {
+    let cruise = km / SPEED;
+    cruise + RAMP.min(cruise)
 }
 
-/// How long a trip of `km` takes, s.
-fn trip_secs(km: f64) -> f64 {
-    NEAR_SECS + (FAR_SECS - NEAR_SECS) * haul(km)
+/// How much of a trip of `km` is behind it `t` s in, 0-1.
+fn trip_share(km: f64, t: f64) -> f64 {
+    let (secs, ramp) = (trip_secs(km), RAMP.min(km / SPEED));
+    if secs <= 0.0 {
+        return 1.0;
+    }
+    // km gone `t` s in, until halfway; the slowing down mirrors the speeding up.
+    let gone = |t: f64| SPEED * if t < ramp { t * t / (2.0 * ramp) } else { t - ramp / 2.0 };
+    let t = t.clamp(0.0, secs);
+    (if t < secs / 2.0 { gone(t) } else { km - gone(secs - t) }) / km
 }
 
 /// A trip from where the sky was last drawn to the chosen place.
@@ -33,8 +41,7 @@ fn trip_secs(km: f64) -> f64 {
 struct Travel {
     from: (f64, f64),
     start: f64, // animation time
-    secs: f64,
-    cloud_per_km: f64, // world units the clouds slide per km the sky travels on this trip
+    km: f64,
 }
 
 /// The post clock's offset from UTC sliding from where it stood to the zone it now shows.
@@ -193,16 +200,20 @@ impl SkyClock {
         Self { mode, tz, place, travel: None, shown: place, city_tz, city_time: false, glide: None, cycle_start, date, fog }
     }
 
-    /// A city was chosen: the sky travels to it, from where it stands now, from animation time
-    /// `now` for NEAR_SECS to FAR_SECS by the distance; the sun rises and sets there afterwards.
-    /// `timezone` is its IANA zone name ("" if unknown), for the post clock.
+    /// Where the sky was last drawn: a trip to a new city starts there.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn shown(&self) -> (f64, f64) {
+        self.shown
+    }
+
+    /// A city was chosen: the sky travels to it at SPEED, from where it stands now, from
+    /// animation time `now`; the sun rises and sets there afterwards. `timezone` is its IANA zone
+    /// name ("" if unknown), for the post clock, whose hands slide there over the trip.
     #[cfg_attr(not(windows), allow(dead_code))] // chosen from the tray
     pub fn set_place(&mut self, place: (f64, f64), timezone: &str, now: f64) {
         let (km, _) = sun::step(self.shown, place);
-        self.glide_clock(now, trip_secs(km), |sky| sky.city_tz = TimeZone::get(timezone).ok());
-        let h = haul(km);
-        let cloud_per_km = if km > 0.0 { h * FAR_SLIDE / km } else { 0.0 };
-        self.travel = Some(Travel { from: self.shown, start: now, secs: trip_secs(km), cloud_per_km });
+        self.glide_clock(now, trip_secs(km).max(CLOCK_SECS), |sky| sky.city_tz = TimeZone::get(timezone).ok());
+        self.travel = (km > 0.0).then_some(Travel { from: self.shown, start: now, km });
         self.place = place;
         let day = today(&self.tz, self.date);
         let today = sun::sun_times(day.date, day.offset_min, place);
@@ -212,23 +223,25 @@ impl SkyClock {
     /// Where the sky is at animation time `t` (s): on the great circle from the old city to the
     /// chosen one, or at the chosen one.
     pub fn place_at(&self, t: f64) -> (f64, f64) {
-        match self.travel {
-            Some(Travel { from, start, secs, .. }) => {
-                let f = smoothstep(((t - start) / secs).clamp(0.0, 1.0), 0.0, 1.0);
-                sun::great_circle(from, self.place, f)
-            }
-            None => self.place,
+        match (self.travel, self.progress(t)) {
+            (Some(Travel { from, .. }), Some(f)) => sun::great_circle(from, self.place, f),
+            _ => self.place,
         }
     }
 
+    /// How much of the trip under way is behind the sky at animation time `t`, 0-1; None if arrived.
+    pub fn progress(&self, t: f64) -> Option<f64> {
+        self.travel.map(|Travel { start, km, .. }| trip_share(km, t - start))
+    }
+
     /// Notes that the sky is drawn at `t` and returns how far the clouds slide over the ground
-    /// (world x, z) since the last frame: against the way the sky travelled, FAR_SLIDE at most.
+    /// (world x, z) since the last frame: against the way the sky travelled.
     pub fn advance(&mut self, t: f64) -> [f64; 2] {
         let here = self.place_at(t);
         let (km, bearing) = sun::step(self.shown, here);
         self.shown = here;
-        let per_km = self.travel.map_or(0.0, |trip| trip.cloud_per_km);
-        if self.travel.is_some_and(|trip| t - trip.start >= trip.secs) {
+        let per_km = if self.travel.is_some() { CLOUD_PER_KM } else { 0.0 };
+        if self.travel.is_some_and(|trip| t - trip.start >= trip_secs(trip.km)) {
             self.travel = None;
         }
         // Against the way travelled, on the compass the sun is placed by (east right, north up).
@@ -245,7 +258,7 @@ impl SkyClock {
 
     /// The post clock shows the chosen city's time (or the PC's): its hands slide there.
     pub fn set_city_time(&mut self, on: bool, now: f64) {
-        self.glide_clock(now, NEAR_SECS, |sky| sky.city_time = on);
+        self.glide_clock(now, CLOCK_SECS, |sky| sky.city_time = on);
     }
 
     // The offset (minutes east of UTC) the post clock's hands show for `instant` at animation time `t`.
@@ -353,14 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn a_short_hop_is_quick_and_gentle_and_a_long_haul_slower_and_levels_off() {
-        let (hanoi, london, far_side) = (1150.0, 9500.0, 20000.0);
-        assert!((trip_secs(0.0) - NEAR_SECS).abs() < 1e-9);
-        assert!(trip_secs(hanoi) > trip_secs(20.0) && trip_secs(london) > trip_secs(hanoi));
-        assert!(trip_secs(far_side) < FAR_SECS, "never longer than the longest haul");
-        assert!(trip_secs(far_side) - trip_secs(london) < 0.5, "and nearly flat out there");
-        assert!(haul(20.0) * FAR_SLIDE < 1.0, "a hop of 20 km barely moves the clouds");
-        assert!(haul(far_side) * FAR_SLIDE <= FAR_SLIDE);
+    fn a_trip_goes_at_1_km_a_second_after_speeding_up_gently() {
+        let km = sun::step((16.0544, 108.2022), (12.6667, 108.05)).0; // Da Nang to Buon Ma Thuot
+        assert!((trip_secs(km) - (km + RAMP)).abs() < 1e-9 && (370.0..390.0).contains(&km), "{km} km");
+        let share = |t: f64| trip_share(km, t);
+        assert_eq!((share(-1.0), share(0.0), share(trip_secs(km) + 1.0)), (0.0, 0.0, 1.0));
+        assert!(((share(100.0) - share(99.0)) * km - SPEED).abs() < 1e-9, "cruising at SPEED");
+        assert!((share(0.2) - share(0.1)) * km < 0.2 * SPEED, "slow off the mark");
+        let steps: Vec<f64> = (0..=400).map(|k| share(k as f64)).collect();
+        assert!(steps.windows(2).all(|w| w[1] >= w[0]), "never back");
+        // A hop of 1 km never gets up to speed: 2 s, halfway at 1 s.
+        assert_eq!(trip_secs(1.0), 2.0);
+        assert!((trip_share(1.0, 1.0) - 0.5).abs() < 1e-12);
+        assert_eq!(trip_secs(0.0), 0.0);
     }
 
     #[test]
@@ -390,16 +408,16 @@ mod tests {
                 total[1] += s[1];
             }
             assert_eq!(sky.advance(secs + 1.0), [0.0, 0.0], "arrived: nothing more");
-            (total, haul(sun::step((0.0, 0.0), to).0) * FAR_SLIDE)
+            (total, sun::step((0.0, 0.0), to).0 * CLOUD_PER_KM)
         };
         // Due east: the clouds go to the screen's left, i.e. against EAST.
         let (total, by) = slid((0.0, 90.0));
         let want = [-sky::EAST[0] * by, -sky::EAST[1] * by];
-        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "east: {total:?} not {want:?}");
+        assert!((total[0] - want[0]).abs() < 1e-6 * by && (total[1] - want[1]).abs() < 1e-6 * by, "east: {total:?} not {want:?}");
         // Due north: down the screen, against NORTH.
         let (total, by) = slid((10.0, 0.0));
         let want = [-sky::NORTH[0] * by, -sky::NORTH[1] * by];
-        assert!((total[0] - want[0]).abs() < 1e-3 && (total[1] - want[1]).abs() < 1e-3, "north: {total:?} not {want:?}");
+        assert!((total[0] - want[0]).abs() < 1e-6 * by && (total[1] - want[1]).abs() < 1e-6 * by, "north: {total:?} not {want:?}");
     }
 
     #[test]
@@ -424,11 +442,22 @@ mod tests {
         assert_eq!(offset_at(&sky, 10.0), pc, "the PC's time until asked for the city's");
         sky.set_city_time(true, 20.0);
         assert!((offset_at(&sky, 20.0) - pc).abs() < 1e-9, "starts where the hands were");
-        assert!((offset_at(&sky, 20.0 + NEAR_SECS / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway at half the time");
-        assert_eq!(offset_at(&sky, 20.0 + NEAR_SECS), 540.0, "Tokyo is UTC+9");
+        assert!((offset_at(&sky, 20.0 + CLOCK_SECS / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway at half the time");
+        assert_eq!(offset_at(&sky, 20.0 + CLOCK_SECS), 540.0, "Tokyo is UTC+9");
         sky.set_city_time(false, 100.0);
         assert!((offset_at(&sky, 100.0) - 540.0).abs() < 1e-9, "and back from where they stood");
-        assert_eq!(offset_at(&sky, 100.0 + NEAR_SECS), pc);
+        assert_eq!(offset_at(&sky, 100.0 + CLOCK_SECS), pc);
+    }
+
+    #[test]
+    fn on_the_citys_time_the_hands_slide_over_the_whole_trip() {
+        let mut sky = sky_at("place = 0, 0\n");
+        sky.set_city_time(true, 0.0);
+        let pc = offset_at(&sky, 10.0);
+        sky.set_place((35.7, 139.7), "Asia/Tokyo", 10.0);
+        let secs = trip_secs(sun::step((0.0, 0.0), (35.7, 139.7)).0);
+        assert!((offset_at(&sky, 10.0 + secs / 2.0) - (pc + 540.0) / 2.0).abs() < 1e-9, "halfway there, half the way round");
+        assert_eq!(offset_at(&sky, 10.0 + secs), 540.0);
     }
 
     #[test]

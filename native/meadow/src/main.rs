@@ -57,7 +57,7 @@ const MAX_DT: f64 = 0.1; // s: a hitch or a pause doesn't jump the animation
 pub enum UserEvent {
     Tray(wallpaper::TrayAction),                                              // a tray menu click
     City(meadow_core::weather::City),                                         // chosen in the search
-    Weather((f64, f64), Result<meadow_core::weather::Weather, String>), // a fetch for this place came back
+    Weather(Vec<(f64, f64)>, Result<Vec<meadow_core::weather::Weather>, String>), // a fetch for these places came back
 }
 #[cfg(not(windows))]
 type UserEvent = ();
@@ -158,7 +158,7 @@ impl App {
             return;
         }
         #[cfg(windows)]
-        let weather = self.weather.current();
+        let weather = self.weather.current(self.sky.progress(time));
         #[cfg(not(windows))]
         let weather = None;
         let sky = self.sky.state(time, weather.as_ref());
@@ -353,8 +353,9 @@ impl App {
     #[cfg(windows)]
     fn choose_city(&mut self, city: meadow_core::weather::City) {
         log::info!("city: {}, {} ({:.4}, {:.4})", city.name, city.detail, city.lat, city.lon);
+        let (from, progress) = (self.sky.shown(), self.sky.progress(self.time));
         self.sky.set_place((city.lat, city.lon), &city.timezone, self.time);
-        self.weather.set_place((city.lat, city.lon));
+        self.weather.set_place(from, (city.lat, city.lon), progress);
         if let Some(desktop) = self.desktop.as_ref() {
             desktop.set_city(&city.name);
         }
