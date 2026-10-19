@@ -5,12 +5,13 @@
 // `place = lat, lon` overrides the place guessed from the time zone (sunrise and sunset). A city
 // chosen from the tray sets `place` (and `city`, its name) and brings its real cloud cover and
 // wind, fetched from Open-Meteo every half hour.
-// Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4,
-// --wallpaper (Windows: behind the desktop icons, with a tray menu, on the E-cores), --hour H
+// On Windows the meadow is the wallpaper (behind the desktop icons, with a tray menu, on the
+// E-cores) unless --window, --screens or --fullscreen asks for a window.
+// Args, for this run only: --fps N (60/30/20/15; 0 = no cap, vsync), --pixel-size 2|3|4, --hour H
 // (pin the sky at local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the
 // clock), --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
 // WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams).
-// --wallpaper (Windows: behind the desktop icons, with a tray menu), --hour H (pin the sky at
+// --window (Windows: a window, not the wallpaper), --hour H (pin the sky at
 // local hour H, 0-24, e.g. 18.5), --cycle (the 300 s day, from --hour or the clock),
 // --toggle-clock S (break and mend the post clock every S seconds, not saved), --screens
 // WxH+X+Y,... (windowed: a window per listed monitor, the first the primary, to check the seams),
@@ -563,13 +564,13 @@ fn rewrite_settings(what: &str, edit: impl FnOnce(&str) -> String) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let wallpaper = args.iter().any(|a| a == "--wallpaper");
+    // --wallpaper is still taken (the old default), as autostart entries and scripts pass it.
+    let windowed = ["--window", "--screens", "--fullscreen"].iter().any(|flag| args.iter().any(|a| a == flag));
+    let wallpaper = cfg!(windows) && !windowed;
     #[cfg(windows)]
     if wallpaper && wallpaper::already_running() {
         return; // before the logger: the running one keeps its log file
     }
-    #[cfg(not(windows))]
-    assert!(!wallpaper, "--wallpaper is Windows only");
     let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("meadow=info,wgpu_core=warn,wgpu_hal=warn"));
     if cfg!(all(windows, not(debug_assertions)))
         && let Some(file) = log_file()
