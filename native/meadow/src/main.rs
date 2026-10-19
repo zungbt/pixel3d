@@ -174,7 +174,7 @@ impl App {
         };
         // The ETA in the corner while travelling.
         #[cfg(windows)]
-        let label = eta.map(|(km, secs, shown)| (meadow_core::label::eta(self.city.as_deref().unwrap_or(""), km, secs, self.settings.unit), shown));
+        let label = eta.map(|(km, _, shown)| (meadow_core::label::eta(self.city.as_deref().unwrap_or(""), km, self.settings.speed.km_s(), self.settings.unit), shown));
         #[cfg(not(windows))]
         let label = eta.map(|(_, _, shown)| ([String::new(), String::new()], shown));
         scene.renderer.set_label(&scene.gpu.queue, label);

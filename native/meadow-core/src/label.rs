@@ -86,12 +86,15 @@ pub fn letters(name: &str) -> String {
     all.trim().chars().take(((SIZE.0 - 2) / ADVANCE) as usize).collect()
 }
 
-/// The ETA's two lines: the city, then the time and the distance left.
-pub fn eta(name: &str, km_left: f64, secs_left: f64, unit: Unit) -> [String; 2] {
-    let s = secs_left.max(0.0).ceil() as u64;
+/// The ETA's two lines: the city, then the time and the distance left. The time is the distance
+/// at `km_s` and both round up, so they tick together (at 1 km/s the seconds match the km).
+pub fn eta(name: &str, km_left: f64, km_s: f64, unit: Unit) -> [String; 2] {
+    let up = |x: f64| (x - 1e-9).ceil().max(0.0); // 1e-9: 0.42 km is 420.00000000000006 m
+    let km = km_left.max(0.0);
+    let s = up(km / km_s) as u64;
     let time = if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) };
-    let d = unit.of(km_left.max(0.0));
-    let dist = if d >= 10.0 { format!("{d:.0}") } else { format!("{d:.1}") };
+    let d = unit.of(km);
+    let dist = if d >= 10.0 { format!("{:.0}", up(d)) } else { format!("{:.1}", up(d * 10.0) / 10.0) };
     [letters(name), format!("{time} · {dist} {}", unit.symbol().to_uppercase())]
 }
 
@@ -154,10 +157,18 @@ mod tests {
 
     #[test]
     fn the_eta_shows_the_time_and_distance_left() {
-        assert_eq!(eta("Buôn Ma Thuột", 252.4, 251.2, Unit::Km), ["BUON MA THUOT", "4:12 · 252 KM"]);
-        assert_eq!(eta("London", 9500.0, 9502.0, Unit::Mi), ["LONDON", "2:38:22 · 5903 MI"]);
-        assert_eq!(eta("Huế", 0.42, 1.4, Unit::M), ["HUE", "0:02 · 420 M"]);
-        assert_eq!(eta("Huế", 3.24, 4.0, Unit::Km)[1], "0:04 · 3.2 KM");
+        assert_eq!(eta("Buôn Ma Thuột", 252.4, 1.0, Unit::Km), ["BUON MA THUOT", "4:13 · 253 KM"]);
+        assert_eq!(eta("London", 9500.0, 1.0, Unit::Mi), ["LONDON", "2:38:20 · 5904 MI"]);
+        assert_eq!(eta("Huế", 0.42, 0.25, Unit::M), ["HUE", "0:02 · 420 M"]);
+        assert_eq!(eta("Huế", 3.24, 1.0, Unit::Km)[1], "0:04 · 3.3 KM");
+    }
+
+    #[test]
+    fn the_eta_time_and_distance_tick_together() {
+        assert_eq!(eta("x", 251.0, 1.0, Unit::Km)[1], "4:11 · 251 KM");
+        assert_eq!(eta("x", 250.999, 1.0, Unit::Km)[1], "4:11 · 251 KM");
+        assert_eq!(eta("x", 250.0, 1.0, Unit::Km)[1], "4:10 · 250 KM");
+        assert_eq!(eta("x", 0.0, 1.0, Unit::Km)[1], "0:00 · 0.0 KM");
     }
 
     #[test]
