@@ -350,9 +350,8 @@ function spreadFrom(rand) {
   return () => (rand() - 0.5) * (SIZE - 3);
 }
 
-function tooCloseTo(trees) {
-  return (x, z, minDist) =>
-    trees.some((t) => Math.hypot(t.position.x - x, t.position.z - z) < minDist);
+function tooClose(trees, x, z, minDist) {
+  return trees.some((t) => Math.hypot(t.position.x - x, t.position.z - z) < minDist);
 }
 
 // Trees: groves where the forest mask is high, rare loners in clearings,
@@ -360,12 +359,11 @@ function tooCloseTo(trees) {
 function scatterTrees(rand, materials) {
   const spread = spreadFrom(rand);
   const trees = [];
-  const tooClose = tooCloseTo(trees);
   for (let attempt = 0; attempt < 4000 && trees.length < 120; attempt++) {
     const x = spread();
     const z = spread();
     const forest = THREE.MathUtils.smoothstep(fbm(x * 0.09, z * 0.09), 0.45, 0.65);
-    if (rand() > Math.max(forest, 0.01) || tooClose(x, z, 1.6) || sandQ(x, z) < 1.15 || mainPathEdge(x, z) < 1) continue;
+    if (rand() > Math.max(forest, 0.01) || tooClose(trees, x, z, 1.6) || sandQ(x, z) < 1.15 || mainPathEdge(x, z) < 1) continue;
     const tree = buildTree(rand, materials);
     placeOnGround(tree, x, z);
     tree.userData.phase = trees.length * 2.4;
@@ -379,12 +377,11 @@ function scatterTrees(rand, materials) {
 // Note `tooClose` checks trees only — rocks may touch each other, just not trunks.
 function scatterRocks(rand, materials, trees) {
   const spread = spreadFrom(rand);
-  const tooClose = tooCloseTo(trees);
   const rocks = [];
   for (let clusters = 0, attempt = 0; clusters < 12 && attempt < 500; attempt++) {
     const cx = spread();
     const cz = spread();
-    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(cx, cz, 1.5) || mainPathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
+    if (rand() > 0.3 + slopeAt(cx, cz) * 1.5 || tooClose(trees, cx, cz, 1.5) || mainPathEdge(cx, cz) < 0.9 + 0.15 || pondEdge(cx, cz) < 0.9) continue;
     clusters++;
     const stones = [[cx, cz, 0.6 + rand() * 0.3]];
     const small = 2 + Math.floor(rand() * 4);
@@ -394,7 +391,7 @@ function scatterRocks(rand, materials, trees) {
       stones.push([cx + Math.cos(a) * d, cz + Math.sin(a) * d, 0.2 + rand() * 0.15]);
     }
     for (const [x, z, r] of stones) {
-      if (tooClose(x, z, 0.7) || pondEdge(x, z) < r || mainPathEdge(x, z) < r + 0.15) continue;
+      if (tooClose(trees, x, z, 0.7) || pondEdge(x, z) < r || mainPathEdge(x, z) < r + 0.15) continue;
       const rock = buildRock(rand, r, materials.rock);
       placeOnGround(rock, x, z);
       rocks.push(rock);

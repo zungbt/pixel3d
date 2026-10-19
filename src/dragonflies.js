@@ -26,7 +26,7 @@ function wingsGeometry(side) {
   return mergeGeometries(wings);
 }
 
-// One mesh per dragonfly: a shared box body and two shared wing meshes, tinted per colour.
+// One group per dragonfly: shared body and wing geometry and wing material, body tinted per colour.
 function spawnFlies(scene, ctx) {
   const gradientMap = ctx.world.gradientMap;
   const shoreRocks = ctx.world.rocks.filter((r) => pondEdge(r.position.x, r.position.z) < 2.5);
@@ -71,7 +71,7 @@ function spawnFlies(scene, ctx) {
   return flies;
 }
 
-// The flight behaviour set over one pond context. Each helper mutates the single dragonfly `d`
+// The flight behaviour for every dragonfly, rim and roamers alike. Each helper mutates the single dragonfly `d`
 // it is given (and its d.target) and nothing else, so the state machine below can be read
 // top-to-bottom without reaching into geometry or material code.
 function createFlight(ctx) {
@@ -101,6 +101,8 @@ function createFlight(ctx) {
     return false;
   }
 
+  // Mostly over the water near the rim, a little over the bank; a roamer anywhere open nearby
+  // (or nowhere, so it just hovers again).
   function dart(d) {
     if (d.home === null) {
       if (!meadowSpot(d, d.target, 0.4 + d.rand() * 0.4)) d.target.copy(d.pos);
@@ -161,43 +163,44 @@ function createFlight(ctx) {
     d.timer = (0.5 + d.rand() * 1.5) * d.hoverScale;
   }
 
-  return { clearAt, meadowSpot, dart, hunt, preyFor, toPerch, toSettle, hover };
-}
+  // Straight-line flight to d.target; true on arrival. Until the body faces the target it
+  // brakes instead (steering toward where it already is), so a re-dart never slides sideways.
+  function flyTo(d, dt) {
+    const dx = d.target.x - d.pos.x;
+    const dz = d.target.z - d.pos.z;
+    const facing = Math.hypot(dx, dz) < 0.3 || Math.abs(wrapAngle(Math.atan2(dx, dz) - d.yaw)) < FACING;
+    ctx.steer(d.pos, d.vel, facing ? d.target : d.pos, d.dartSpeed, DART_ACCEL, dt);
+    ctx.avoid(d.pos, d.vel, dt, 0.15, d.rock);
+    d.pos.addScaledVector(d.vel, dt);
+    d.timer -= dt;
+    if (d.pos.distanceTo(d.target) > 0.1) return false;
+    d.pos.copy(d.target);
+    d.vel.set(0, 0, 0);
+    return true;
+  }
 
-// Straight-line flight to d.target; true on arrival. Until the body faces the target it
-// brakes instead (steering toward where it already is), so a re-dart never slides sideways.
-function flyTo(d, ctx, dt) {
-  const dx = d.target.x - d.pos.x;
-  const dz = d.target.z - d.pos.z;
-  const facing = Math.hypot(dx, dz) < 0.3 || Math.abs(wrapAngle(Math.atan2(dx, dz) - d.yaw)) < FACING;
-  ctx.steer(d.pos, d.vel, facing ? d.target : d.pos, d.dartSpeed, DART_ACCEL, dt);
-  ctx.avoid(d.pos, d.vel, dt, 0.15, d.rock);
-  d.pos.addScaledVector(d.vel, dt);
-  d.timer -= dt;
-  if (d.pos.distanceTo(d.target) > 0.1) return false;
-  d.pos.copy(d.target);
-  d.vel.set(0, 0, 0);
-  return true;
-}
+  // Holds station with tiny corrections.
+  const _aim = new THREE.Vector3();
+  function hoverStep(d, dt) {
+    _aim.set(
+      d.target.x + (d.rand() - 0.5) * 0.1,
+      d.target.y + (d.rand() - 0.5) * 0.06,
+      d.target.z + (d.rand() - 0.5) * 0.1,
+    );
+    ctx.steer(d.pos, d.vel, _aim, 0.4, 6, dt);
+    ctx.avoid(d.pos, d.vel, dt, 0.15, null);
+    d.pos.addScaledVector(d.vel, dt);
+  }
 
-// Holds station with tiny corrections.
-const _aim = new THREE.Vector3();
-function hoverStep(d, ctx, dt) {
-  _aim.set(
-    d.target.x + (d.rand() - 0.5) * 0.1,
-    d.target.y + (d.rand() - 0.5) * 0.06,
-    d.target.z + (d.rand() - 0.5) * 0.1,
-  );
-  ctx.steer(d.pos, d.vel, _aim, 0.4, 6, dt);
-  ctx.avoid(d.pos, d.vel, dt, 0.15, null);
-  d.pos.addScaledVector(d.vel, dt);
+  return { clearAt, dart, hunt, preyFor, toPerch, toSettle, hover, flyTo, hoverStep };
 }
 
 const flying = (d) => d.state !== 'perch' && d.state !== 'settle';
 const straight = (d) => d.state === 'dart' || d.state === 'toPerch' || d.state === 'toSettle';
+const patrolling = (d) => d.state === 'dart' || d.state === 'hover';
 
 // The per-dragonfly state machine: dawn/dusk transitions, then fly whatever state it is in.
-function stepState(flies, ctx, flight, sky, dt) {
+function stepState(flies, flight, sky, dt) {
   for (const d of flies) {
     const dark = sky.daylight < d.threshold;
     if (d.state === null) {
@@ -226,10 +229,10 @@ function stepState(flies, ctx, flight, sky, dt) {
     d.cooldown -= dt;
     switch (d.state) {
       case 'dart':
-        if (flyTo(d, ctx, dt) || d.timer <= 0) flight.hover(d);
+        if (flight.flyTo(d, dt) || d.timer <= 0) flight.hover(d);
         break;
       case 'hover':
-        hoverStep(d, ctx, dt);
+        flight.hoverStep(d, dt);
         if ((d.timer -= dt) <= 0) {
           const prey = flight.preyFor(d);
           const huntChance = prey ? HUNT : 0;
@@ -240,14 +243,14 @@ function stepState(flies, ctx, flight, sky, dt) {
         }
         break;
       case 'toPerch':
-        if (flyTo(d, ctx, dt)) (d.state = 'perch'), (d.timer = 3 + d.rand() * 7);
+        if (flight.flyTo(d, dt)) (d.state = 'perch'), (d.timer = 3 + d.rand() * 7);
         else if (d.timer <= 0) flight.dart(d);
         break;
       case 'perch':
         if ((d.timer -= dt) <= 0) flight.dart(d);
         break;
       case 'toSettle':
-        if (flyTo(d, ctx, dt)) d.state = 'settle';
+        if (flight.flyTo(d, dt)) d.state = 'settle';
         else if (d.timer <= 0) flight.toSettle(d);
         break;
     }
@@ -260,7 +263,6 @@ function stepRivals(flies, flight) {
     for (let j = i + 1; j < flies.length; j++) {
       const a = flies[i];
       const b = flies[j];
-      const patrolling = (d) => d.state === 'dart' || d.state === 'hover';
       if (!patrolling(a) || !patrolling(b) || a.cooldown > 0 || b.cooldown > 0) continue;
       if (a.pos.distanceTo(b.pos) > 1) continue;
       for (const d of [a, b]) flight.dart(d), (d.cooldown = 1.5);
@@ -300,7 +302,7 @@ export function buildDragonflies(scene, ctx) {
   const flight = createFlight(ctx);
   return {
     update(t, dt, sky) {
-      stepState(flies, ctx, flight, sky, dt);
+      stepState(flies, flight, sky, dt);
       stepRivals(flies, flight);
       updateVisuals(flies, dt);
     },
