@@ -931,20 +931,42 @@ impl Renderer {
     }
 
     /// New window size for view `i` (never 0): rebuilds its art targets, post bind group and camera
-    /// together. The primary's (view 0's) size sets the others' scale: resize it first.
+    /// together. The primary's (view 0's) size sets the others' scale: resize it first. A window
+    /// size that lands on the art size already in use keeps the targets: a restore from minimised,
+    /// or a drag inside one pixel size, reports a new window size for the same art, and rebuilding
+    /// its textures and bind groups there is what made the first frame after a restore hitch.
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, width: u32, height: u32) {
         if i == 0 {
             self.primary = (width, height);
         }
         let primary_art = art_size(self.primary.0, self.primary.1, self.pixel_size);
         let view = &mut self.views[i];
-        view.art = art_size(width, height, self.pixel_size);
-        view.pane = Pane::new(view.art, view.offset, primary_art, self.pixel_size);
-        view.targets = Self::targets(device, &self.binds, &view.post_buf, view.art, view.pane);
+        let art = art_size(width, height, self.pixel_size);
+        // Pane folds art, offset, primary and pixel size together (camera::Pane::new), so an equal
+        // pane also means an equal art size and an equal camera.
+        let pane = Pane::new(art, view.offset, primary_art, self.pixel_size);
+        let same = view.art == art && view.pane == pane;
+        view.art = art;
+        view.pane = pane;
+        // Only the targets are worth keeping: four textures (one a baked cloud map) and two bind
+        // groups. Everything else is cheap and has to run every time, because Renderer::new leaves
+        // it at its default — the post uniform unwritten (a zero art size and pixel size: undefined
+        // sampling) and the grass count 0 (which draws no blades at all).
+        if !same {
+            view.targets = Self::targets(device, &self.binds, &view.post_buf, art, pane);
+        }
         view.grass.set_view(view.pane, view.art);
-        let params = PostParams { art: [view.art.0, view.art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain };
+        let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain };
         queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
-        log::info!("view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn", view.art.0, view.art.1, self.pixel_size, view.pane.centre, view.grass.count);
+        log::info!(
+            "view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn{}",
+            view.art.0,
+            view.art.1,
+            self.pixel_size,
+            view.pane.centre,
+            view.grass.count,
+            if same { ", targets kept" } else { "" }
+        );
     }
 
     /// Every insect one step on (in the web's species order) and at its pose for this frame.
@@ -1212,6 +1234,24 @@ mod tests {
     fn art_pixels_cover_the_window() {
         assert_eq!(art_size(1280, 720, 2), (640, 360));
         assert_eq!(art_size(1281, 719, 3), (427, 240));
+    }
+
+    // `resize` keeps the art targets when the art size is unchanged, which is what stops a restore
+    // from minimised rebuilding them. art_size is the only part of that check a test can reach
+    // without a device, so pin the comparison it relies on.
+    #[test]
+    fn art_size_is_stable_within_a_pixel_size() {
+        for (w, h, px) in [(1920, 1080, 2), (1280, 720, 3), (2560, 1440, 4)] {
+            let a = art_size(w, h, px);
+            // art_size rounds up, so the window sizes sharing this art size run from the first
+            // multiple of px below w up to w itself; a restore reports one of those.
+            let lo = (w - 1) / px * px + 1;
+            for w2 in lo..=w {
+                assert_eq!(a, art_size(w2, h, px), "{w2}x{h} at {px}");
+            }
+            // A full art pixel more is a different art size.
+            assert_ne!(a, art_size(lo + px, h, px), "{w}x{h} at {px}");
+        }
     }
 
     #[test]
