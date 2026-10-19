@@ -11,7 +11,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
 
-const EVERY: Duration = Duration::from_secs(30 * 60);
+const EVERY: Duration = Duration::from_secs(15 * 60); // Open-Meteo's current values step every 15 min
 const RETRY: Duration = Duration::from_secs(5 * 60);
 const STALE: Duration = Duration::from_secs(2 * 60 * 60);
 const FADE: Duration = Duration::from_secs(8); // the last weather shown turns into the newly fetched one over this
