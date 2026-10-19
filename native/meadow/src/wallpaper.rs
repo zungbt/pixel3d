@@ -158,7 +158,7 @@ impl Tray {
 
 /// A travel speed in the tray, e.g. "Siêu thanh · 1 km/s".
 fn speed_label(speed: Speed, unit: Unit) -> String {
-    let name = ["Máy bay", "Siêu thanh", "Tên lửa", "Vệ tinh"][speed as usize];
+    let name = ["Máy bay", "Siêu thanh", "Tên lửa", "Vệ tinh", "Sao băng", "Ánh sáng"][speed as usize];
     format!("{name} · {}", label::speed(speed.km_s(), unit))
 }
 

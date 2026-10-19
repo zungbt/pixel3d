@@ -14,17 +14,19 @@ pub enum Speed {
     Supersonic,
     Rocket,
     Satellite,
+    Meteor,
+    Light,
 }
 
 impl Speed {
-    pub const ALL: [Speed; 4] = [Speed::Plane, Speed::Supersonic, Speed::Rocket, Speed::Satellite];
+    pub const ALL: [Speed; 6] = [Speed::Plane, Speed::Supersonic, Speed::Rocket, Speed::Satellite, Speed::Meteor, Speed::Light];
 
     pub fn km_s(self) -> f64 {
-        [0.25, 1.0, 5.0, 7.7][self as usize]
+        [0.25, 1.0, 5.0, 7.7, 40.0, 299_792.458][self as usize]
     }
 
     fn key(self) -> &'static str {
-        ["plane", "supersonic", "rocket", "satellite"][self as usize]
+        ["plane", "supersonic", "rocket", "satellite", "meteor", "light"][self as usize]
     }
 }
 

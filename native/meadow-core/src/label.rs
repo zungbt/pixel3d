@@ -167,6 +167,7 @@ mod tests {
         assert_eq!(speed(7.7, Unit::Km), "7.7 km/s");
         assert_eq!(speed(0.25, Unit::Mi), "0.16 mi/s");
         assert_eq!(speed(7.7, Unit::M), "7700 m/s");
+        assert_eq!(speed(299_792.458, Unit::Km), "299792 km/s");
     }
 
     #[test]
