@@ -92,8 +92,14 @@ impl Gpu {
         self.failed.load(Ordering::Relaxed)
     }
 
-    /// Never called with a 0 size: configuring a 0x0 surface panics.
+    /// Never called with a 0 size: configuring a 0x0 surface panics. The size already configured
+    /// is skipped: a restore from minimised or a pixel size change asks for it, and recreating the
+    /// swapchain there cost 80-180 ms (Intel Vulkan). If the old one no longer fits, acquire sees
+    /// it Outdated and reconfigures.
     pub fn configure(&self, s: &mut Surface, width: u32, height: u32) {
+        if (s.config.width, s.config.height) == (width, height) {
+            return;
+        }
         s.config.width = width;
         s.config.height = height;
         s.surface.configure(&self.device, &s.config);
