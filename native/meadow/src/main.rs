@@ -414,6 +414,8 @@ impl ApplicationHandler<UserEvent> for App {
                 scene.minimised[i] = size.width == 0 || size.height == 0;
                 if !scene.minimised[i] {
                     scene.resized[i] = Some(size);
+                } else if !scene.drawn().contains(&true) {
+                    self.last_frame = None; // no catch-up jump on restore
                 }
                 log::info!("window {i} resized {}x{}{}", size.width, size.height, if scene.minimised[i] { " (paused)" } else { "" });
             }
