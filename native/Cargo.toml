@@ -6,3 +6,8 @@ resolver = "3"
 [profile.release]
 lto = true
 strip = true
+
+# SPIKE: quick look builds; thin LTO runs on every core. Measurements still use --release.
+[profile.quick]
+inherits = "release"
+lto = "thin"

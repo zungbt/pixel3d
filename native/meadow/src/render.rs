@@ -563,10 +563,13 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
     }
     let pond = |lift: f64| Mat4::from_translation(Vec3::new(world::POND_X as f32, (world::shore_y() + lift) as f32, world::POND_Z as f32));
     let at = |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
+    let clears = map_clears();
+    let kept = |x: f64, z: f64| clears.iter().all(|&(cx, cz, r)| (x - cx).hypot(z - cz) > r);
     let trunks: Vec<_> = layout
         .trees
         .iter()
         .chain(&outer.trees)
+        .filter(|t| kept(t.x, t.z))
         .map(|t| {
             let m = at(t.x, t.y + t.height / 2.0, t.z) * Mat4::from_scale(Vec3::new(1.0, t.height as f32, 1.0));
             Instance::swaying(m, TRUNK, t)
@@ -576,12 +579,14 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
         .trees
         .iter()
         .chain(&outer.trees)
+        .filter(|t| kept(t.x, t.z))
         .map(|t| Instance::swaying(at(t.x, t.y + t.height + 0.3, t.z) * Mat4::from_scale(Vec3::splat(t.canopy as f32)), LEAVES, t))
         .collect();
     let rocks: Vec<_> = layout
         .rocks
         .iter()
         .chain(&outer.rocks)
+        .filter(|r| kept(r.x, r.z))
         .map(|r| {
             let m = at(r.x, r.y, r.z) * Mat4::from_rotation_y(r.rot_y as f32) * Mat4::from_scale(Vec3::new(r.r as f32, r.sy as f32, r.r as f32));
             Instance::new(m, ROCK)
@@ -622,9 +627,14 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
 // - `1`: a voxel tree and bench at 16, 10 and 8 voxels per unit (left to right), cube-meshed;
 // - `chamfer`: the same, meshed by voxel_nets::chamfered;
 // - `stress` / `stress-chamfer`: `1` / `chamfer` plus 100 distinct voxel trees;
+// - `stress-glb:<path>;<path>;…`: 100 GLB trees on the stress grid, the files in turn;
 // - `files:<path>;<path>;…`: .vox files at 8 voxels per unit, snapped to the meadow palette
 //   (MEADOW_VOX_RAW=1 keeps their colours; MEADOW_VOX_CHAMFER=1 chamfers them), and .glb/.gltf at
-//   0.4 units per metre, in rows of 8.
+//   0.4 units per metre, swaying as the meadow's trees (both test GLBs are trees), in rows of 8;
+// - `map:<file>`: a hand-arranged layout, one object per line, `path x z yaw scale [raw] [sway]`
+//   (path relative to the map file, yaw in degrees about +y, scale times the format's default above,
+//   `raw` keeps .vox colours, `sway` sways it as a tree; `#` starts a comment). A line
+//   `clear x z r` hides the meadow's own trees and rocks within r of (x, z) (see map_clears).
 fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
     use crate::{glb, vox_file, voxel, voxel_nets};
     const VOX_PER_UNIT: f32 = 8.0;
@@ -634,13 +644,13 @@ fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
     let toward = Vec3::new(1.0, 0.0, 1.0).normalize();
     let chamfer = mode.ends_with("chamfer") || std::env::var("MEADOW_VOX_CHAMFER").is_ok_and(|v| v == "1");
     let mesh = |m: &voxel::Model| if chamfer { voxel_nets::chamfered(m) } else { voxel::meshes(m, true) };
-    // (meshes per colour, world units per mesh unit, ground position, sways)
-    let mut placed: Vec<(Vec<(u32, MeshData)>, f32, Vec3, bool)> = vec![];
+    // (meshes per colour, world units per mesh unit, ground position, sways, yaw in radians)
+    let mut placed: Vec<(Vec<(u32, MeshData)>, f32, Vec3, bool, f32)> = vec![];
     let (mut solid, mut culled_v) = (0usize, 0usize);
     let mut add_vox = |m: voxel::Model, scale: f32, at: Vec3, sways: bool, placed: &mut Vec<_>| {
         solid += m.solid();
         culled_v += voxel::meshes(&m, false).iter().map(|(_, d)| d.vertices.len()).sum::<usize>();
-        placed.push((mesh(&m), scale, at, sways));
+        placed.push((mesh(&m), scale, at, sways, 0.0));
     };
     if let Some(list) = mode.strip_prefix("files:") {
         let raw = std::env::var("MEADOW_VOX_RAW").is_ok_and(|v| v == "1");
@@ -662,10 +672,47 @@ fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
                     add_vox(m, 1.0 / VOX_PER_UNIT, at, false, &mut placed);
                 }
             } else if lower.ends_with(".glb") || lower.ends_with(".gltf") {
-                placed.push((glb::load(&bytes).unwrap_or_else(|e| panic!("{path}: {e}")), GLB_UNITS_PER_M, slot(), false));
+                placed.push((glb::load(&bytes).unwrap_or_else(|e| panic!("{path}: {e}")), GLB_UNITS_PER_M, slot(), true, 0.0));
             } else {
                 panic!("MEADOW_VOXELS: {path} is not .vox, .glb or .gltf");
             }
+        }
+    } else if let Some(file) = mode.strip_prefix("map:") {
+        let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("MEADOW_VOXELS: can't read {file}: {e}"));
+        let dir = std::path::Path::new(file).parent().unwrap_or(std::path::Path::new("."));
+        for (n, line) in text.lines().enumerate() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let w: Vec<&str> = line.split_whitespace().collect();
+            if w[0] == "clear" {
+                continue; // map_clears
+            }
+            let num = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or_else(|| panic!("{file}:{}: want `path x z yaw scale [raw] [sway]`, got {line}", n + 1));
+            let (at, yaw, scale) = (Vec3::new(num(1), 0.0, num(2)), num(3).to_radians(), num(4));
+            let (raw, sway) = (w[5..].contains(&"raw"), w[5..].contains(&"sway"));
+            let path = dir.join(w[0]);
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{file}:{}: can't read {}: {e}", n + 1, path.display()));
+            if w[0].to_ascii_lowercase().ends_with(".vox") {
+                for mut m in vox_file::load(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())) {
+                    if !raw {
+                        vox_file::snap(&mut m, &vox_file::MEADOW);
+                    }
+                    add_vox(m, scale / VOX_PER_UNIT, at, sway, &mut placed);
+                    placed.last_mut().expect("just pushed").4 = yaw;
+                }
+            } else {
+                placed.push((glb::load(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())), scale * GLB_UNITS_PER_M, at, sway, yaw));
+            }
+        }
+    } else if let Some(list) = mode.strip_prefix("stress-glb:") {
+        // SPIKE: 100 GLB trees on the stress grid, the files in turn, each uploaded on its own (as the
+        // voxel stress trees, which are all distinct).
+        let files: Vec<Vec<u8>> = list.split(';').filter(|p| !p.is_empty()).map(|p| std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}"))).collect();
+        for i in 0..100usize {
+            let p = Vec3::new((i % 10) as f32 * 2.4 - 11.0, 0.0, (i / 10) as f32 * 2.4 - 11.0);
+            placed.push((glb::load(&files[i % files.len()]).expect("stress-glb"), GLB_UNITS_PER_M, p, true, 0.0));
         }
     } else {
         for (k, n) in [16usize, 10, 8].into_iter().enumerate() {
@@ -682,10 +729,10 @@ fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
     }
     let (mut verts, mut idx, mut draws) = (0usize, 0usize, vec![]);
     let models = placed.len();
-    for (meshes, scale, at, sways) in placed {
+    for (meshes, scale, at, sways, yaw) in placed {
         let y = world::height_at(at.x as f64, at.z as f64) as f32;
-        let m = Mat4::from_translation(Vec3::new(at.x, y, at.z)) * Mat4::from_scale(Vec3::splat(scale));
-        let tree = world::Tree { x: at.x as f64, y: y as f64, z: at.z as f64, height: 1.1, canopy: 0.75, phase: (at.x * 7.0 + at.z) as f64 };
+        let m = Mat4::from_translation(Vec3::new(at.x, y, at.z)) * Mat4::from_rotation_y(yaw) * Mat4::from_scale(Vec3::splat(scale));
+        let tree = world::Tree { x: at.x as f64, y: y as f64, z: at.z as f64, height: 1.1, canopy: 0.75, phase: ((at.x * 7.0 + at.z) as f64).rem_euclid(std::f64::consts::TAU) }; // base.w < 0 means "no sway" in the shader
         for (color, mesh) in meshes {
             verts += mesh.vertices.len();
             idx += mesh.indices.len();
@@ -700,6 +747,21 @@ fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
         bytes as f64 / 1e6
     );
     draws
+}
+
+// SPIKE: the `clear x z r` lines of a `MEADOW_VOXELS=map:<file>` layout. Only the drawn trees and
+// rocks go: the grass, the birds' perches and the other sims still use the full layout.
+fn map_clears() -> Vec<(f64, f64, f64)> {
+    let Some(file) = std::env::var("MEADOW_VOXELS").ok().and_then(|m| m.strip_prefix("map:").map(str::to_owned)) else { return vec![] };
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").split_whitespace().collect::<Vec<_>>())
+        .filter(|w| w.first() == Some(&"clear"))
+        .map(|w| {
+            let num = |i: usize| w.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or_else(|| panic!("{file}: want `clear x z r`, got {w:?}"));
+            (num(1), num(2), num(3))
+        })
+        .collect()
 }
 
 /// The ground under a pane and PANE_REACH past it: where the world must have something.
