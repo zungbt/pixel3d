@@ -30,6 +30,10 @@ mod mesh;
 mod net;
 mod render;
 mod sky_clock;
+mod voxel; // SPIKE
+mod voxel_nets; // SPIKE
+mod vox_file; // SPIKE
+mod glb; // SPIKE
 #[cfg(windows)]
 mod wallpaper;
 

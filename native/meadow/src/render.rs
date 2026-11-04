@@ -613,6 +613,52 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
         upload(device, mesh::sector(0.0, frog::PAD_R as f32, std::f32::consts::TAU - 0.5, 12), &pads, Shade::Toon, false),
         upload(device, head, &heads, Shade::Toon, false),
     ]
+    .into_iter()
+    .chain(voxel_draws(device))
+    .collect()
+}
+
+// SPIKE: MEADOW_VOXELS=1 puts a voxel tree and bench at 16, 10 and 8 voxels per unit (left to
+// right) in the middle of the screen; MEADOW_VOXELS=stress adds 100 distinct voxel trees.
+fn voxel_draws(device: &wgpu::Device) -> Vec<Draw> {
+    use crate::voxel;
+    let Ok(mode) = std::env::var("MEADOW_VOXELS") else { return vec![] };
+    let right = Vec3::new(1.0, 0.0, -1.0).normalize();
+    let toward = Vec3::new(1.0, 0.0, 1.0).normalize();
+    let mut placed: Vec<(voxel::Model, f32, Vec3, bool)> = vec![];
+    for (k, n) in [16usize, 10, 8].into_iter().enumerate() {
+        let base = right * (k as f32 - 1.0) * 3.2 + toward * 2.0;
+        placed.push((voxel::tree(n, 1), n as f32, base, true));
+        placed.push((voxel::bench(n), n as f32, base + toward * 1.1 + right * 0.4, false));
+    }
+    if mode == "stress" {
+        for i in 0..100u32 {
+            let p = Vec3::new((i % 10) as f32 * 2.4 - 11.0, 0.0, (i / 10) as f32 * 2.4 - 11.0);
+            placed.push((voxel::tree(10, 100 + i), 10.0, p, true));
+        }
+    }
+    let (mut culled_v, mut verts, mut idx, mut solid, mut draws) = (0usize, 0usize, 0usize, 0usize, vec![]);
+    for (model, n, at, sways) in &placed {
+        solid += model.solid();
+        culled_v += voxel::meshes(model, false).iter().map(|(_, m)| m.vertices.len()).sum::<usize>();
+        let y = world::height_at(at.x as f64, at.z as f64) as f32;
+        let m = Mat4::from_translation(Vec3::new(at.x, y, at.z)) * Mat4::from_scale(Vec3::splat(1.0 / n));
+        let tree = world::Tree { x: at.x as f64, y: y as f64, z: at.z as f64, height: 1.1, canopy: 0.75, phase: (at.x * 7.0 + at.z) as f64 };
+        for (color, mesh) in voxel::meshes(model, true) {
+            verts += mesh.vertices.len();
+            idx += mesh.indices.len();
+            let inst = if *sways { Instance::swaying(m, color, &tree) } else { Instance::new(m, color) };
+            draws.push(upload(device, mesh, &[inst], Shade::Toon, true));
+        }
+    }
+    let bytes = verts * size_of::<Vertex>() + idx * 4 + draws.len() * size_of::<Instance>();
+    log::info!(
+        "voxels ({mode}): {} models, {solid} solid voxels, {} draws; vertices {culled_v} culled -> {verts} greedy, {idx} indices, {:.2} MB of GPU buffers",
+        placed.len(),
+        draws.len(),
+        bytes as f64 / 1e6
+    );
+    draws
 }
 
 /// The ground under a pane and PANE_REACH past it: where the world must have something.
