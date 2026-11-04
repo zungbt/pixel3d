@@ -185,7 +185,7 @@ fn tris(out: &[(u32, MeshData)]) -> Vec<[Vec3; 3]>
 - New `MEADOW_VOXELS` modes, alongside the existing `1` and `stress`:
   - `chamfer`: the same 6 models as `1`, meshed with `chamfered`.
   - `stress-chamfer`: `stress` meshed with `chamfered`.
-  - `files:<path>;<path>;…`: `.vox` files go through `vox_file::load` and `snap` (raw colours if `MEADOW_VOX_RAW=1`), then either `meshes(…, true)` or `chamfered` (`MEADOW_VOX_CHAMFER=1`). `.glb`/`.gltf` files go through `glb::load`. Every model is scaled uniformly to 2.0 units tall and placed in a row along `right`, 2.5 units apart, centred, `toward * 2.0`. Nothing sways (`Instance::new`).
+  - `files:<path>;<path>;…`: `.vox` files go through `vox_file::load` and `snap` (raw colours if `MEADOW_VOX_RAW=1`), then either `meshes(…, true)` or `chamfered` (`MEADOW_VOX_CHAMFER=1`). `.glb`/`.gltf` files go through `glb::load`. Changed 2026-11-04 (user): `.vox` at a fixed 8 voxels per unit (keeps each pack's internal proportions, as the editor would) and GLB at 0.4 units per metre (a 6 m Polyfork tree ≈ the meadow tree), in rows of 8, 2.2 units apart. Nothing sways (`Instance::new`).
 
 - [ ] **Step 1:** Implement the modes above, then run `cargo test -p meadow`. Expected: all pass, except the known flaky `sky_clock::an_unknown_city_zone_leaves_the_clock_on_the_pc`.
 - [ ] **Step 2: Look.** Run `cargo build --release`, then the exe with `--window --hour 10` and `--hour 18`, at `--pixel-size 2` and `3`, for `1`, `chamfer`, and `files:` with 3 padadu models plus the Polyfork tree. Take screenshots into the brainstorm page next to spike 1's. The user judges: outlines, tone against the low-poly trees and rocks, snapped vs raw colours.
