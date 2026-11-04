@@ -14,6 +14,25 @@
 - Free CC0 `.vox` packs exist (padadu Fantasy Bundle, Fuzzy Man Studios, theodd1in Voxel Trees, which still needs a licence check).
 - The spike is throwaway, on branch `feat/voxel-spike` in `C:\Users\d\Documents\Github\pixel3d-voxel-spike`.
 
+## Results and decisions (2026-11-04, user)
+
+Measured on the release build, 1280×720 window, `--pixel-size 3 --hour 10`, 15 fps cap. RAM is private bytes after 60 s, 3 runs per mode. The no-voxel baseline is 1 run after 25 s.
+
+| 100 trees | Private RAM | GPU ms/frame |
+|---|---|---|
+| no voxels (baseline) | 102 MB | — |
+| `stress-glb` (Polyfork, 2 files in turn) | 129–131 MB | 2.36–2.66 |
+| `stress` (cube voxels) | 134–136 MB | 2.46–2.77 (run 2 may have been occluded) |
+| `stress-chamfer` | 169 MB | 3.2–3.3 |
+
+Every tree is uploaded as its own mesh. An editor that shares the mesh between identical trees would use less RAM.
+
+- **No chamfer.** By eye it only rounds the canopy edge slightly. It costs about +34 MB and +0.8 ms per 100 trees, and it thins 1-voxel parts (bench backs).
+- **Colour snapping is an option per asset, on by default.** It is a palette remap at load time, so it has no runtime cost. It works per pack: the mmmm trees look right, the padadu golem does not. Before it can be the default, `MEADOW` needs greys: nearest-RGB maps grey stone to `3a4044`/`23262b`, so the golem renders almost black. That was the "black patches" seen next to the ginkgo; the GLB itself renders cleanly.
+- **GLB is a second import format, next to `.vox`.** Cost and sway match the voxel trees. The loader reads `COLOR_0` and the material factor only: **textures are not supported**, and a textured GLB will render white or wrong. The Polyfork licence rule above still applies to bundled files.
+- **Scale: 8 voxels per unit, plus a per-object scale in the map.** Each asset stores its own default (voxels per unit); the map stores one uniform factor per object (`Instance` mat4: no extra RAM or draws). Packs are drawn at different voxel sizes (mmmm lamps and fences come out too big at 8 voxels per unit), so the editor must let the user rescale. Open questions: allow free scale or fixed steps, a minimum scale (at ×0.5 a voxel is about 1.25 art px at ps3, by calculation, not measured), and no non-uniform scale.
+- Fixed during Task 4: the spike's sway phase could be negative, and `model_matrix` reads `base.w < 0` as "no sway", so about half of the `stress` trees and both GLB trees stood still. It is now wrapped to [0, 2π).
+
 ## Global Constraints
 
 - Spike code only: every new item carries a `// SPIKE` or `//! SPIKE` marker. Never merge to `main`. No push.
@@ -185,7 +204,7 @@ fn tris(out: &[(u32, MeshData)]) -> Vec<[Vec3; 3]>
 - New `MEADOW_VOXELS` modes, alongside the existing `1` and `stress`:
   - `chamfer`: the same 6 models as `1`, meshed with `chamfered`.
   - `stress-chamfer`: `stress` meshed with `chamfered`.
-  - `files:<path>;<path>;…`: `.vox` files go through `vox_file::load` and `snap` (raw colours if `MEADOW_VOX_RAW=1`), then either `meshes(…, true)` or `chamfered` (`MEADOW_VOX_CHAMFER=1`). `.glb`/`.gltf` files go through `glb::load`. Changed 2026-11-04 (user): `.vox` at a fixed 8 voxels per unit (keeps each pack's internal proportions, as the editor would) and GLB at 0.4 units per metre (a 6 m Polyfork tree ≈ the meadow tree), in rows of 8, 2.2 units apart. Nothing sways (`Instance::new`).
+  - `files:<path>;<path>;…`: `.vox` files go through `vox_file::load` and `snap` (raw colours if `MEADOW_VOX_RAW=1`), then either `meshes(…, true)` or `chamfered` (`MEADOW_VOX_CHAMFER=1`). `.glb`/`.gltf` files go through `glb::load`. Changed 2026-11-04 (user): `.vox` at a fixed 8 voxels per unit (keeps each pack's internal proportions, as the editor would) and GLB at 0.4 units per metre (a 6 m Polyfork tree ≈ the meadow tree), in rows of 8, 2.2 units apart. Nothing sways (`Instance::new`). Changed later the same day: GLB trees sway, and `stress-glb:<path>;…` puts 100 GLB trees on the stress grid.
 
 - [ ] **Step 1:** Implement the modes above, then run `cargo test -p meadow`. Expected: all pass, except the known flaky `sky_clock::an_unknown_city_zone_leaves_the_clock_on_the_pc`.
 - [ ] **Step 2: Look.** Run `cargo build --release`, then the exe with `--window --hour 10` and `--hour 18`, at `--pixel-size 2` and `3`, for `1`, `chamfer`, and `files:` with 3 padadu models plus the Polyfork tree. Take screenshots into the brainstorm page next to spike 1's. The user judges: outlines, tone against the low-poly trees and rocks, snapped vs raw colours.
