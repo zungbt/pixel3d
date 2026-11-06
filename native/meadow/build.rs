@@ -8,6 +8,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // link.exe embeds the manifest itself; windres only exists for the mingw targets.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        let manifest = PathBuf::from("meadow.manifest").canonicalize().expect("meadow.manifest");
+        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}", manifest.display());
+        return;
+    }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("meadow-manifest.o");
     let status = Command::new("x86_64-w64-mingw32-windres").args(["meadow.rc", "-O", "coff", "-o"]).arg(&out).status().expect("run x86_64-w64-mingw32-windres");
     assert!(status.success(), "windres failed");
