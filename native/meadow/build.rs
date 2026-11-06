@@ -16,7 +16,11 @@ fn main() {
         return;
     }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("meadow-manifest.o");
-    let status = Command::new("x86_64-w64-mingw32-windres").args(["meadow.rc", "-O", "coff", "-o"]).arg(&out).status().expect("run x86_64-w64-mingw32-windres");
+    // SPIKE: this host has no mingw windres; the manifest only matters for wallpaper mode.
+    let Ok(status) = Command::new("x86_64-w64-mingw32-windres").args(["meadow.rc", "-O", "coff", "-o"]).arg(&out).status() else {
+        println!("cargo:warning=no x86_64-w64-mingw32-windres: building without the manifest (spike)");
+        return;
+    };
     assert!(status.success(), "windres failed");
     println!("cargo:rustc-link-arg-bins={}", out.display());
 }
