@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Windows exe in WSL, copy it out of the Linux filesystem and launch it on Windows.
-# Usage: ./run.sh [--release] [-- app args, e.g. --fps 30]
+# Usage: ./run.sh [--release] [-- app args, e.g. --fps 30]; runs windowed (--window), not as the wallpaper
 set -euo pipefail
 cd "$(dirname "$0")"
 profile=debug; build_args=()
@@ -11,4 +11,4 @@ taskkill.exe /IM meadow.exe /F >/dev/null 2>&1 || true # a running exe is locked
 cargo build --target x86_64-pc-windows-gnu "${build_args[@]}"
 mkdir -p "$dest"
 cp "target/x86_64-pc-windows-gnu/$profile/meadow.exe" "$dest/"
-cd "$dest" && exec ./meadow.exe "$@"
+cd "$dest" && exec ./meadow.exe --window "$@"
