@@ -17,6 +17,8 @@ cargo build --target x86_64-pc-windows-gnu    # the shippable exe (Linux/WSL, mi
 ./run.sh [--release] [-- <args>]              # WSL dev loop
 ```
 
+**Release builds are slow on purpose.** `[profile.release]` uses fat LTO (`lto = true`), whose final step runs on about one core: about 2 min 30 s on this 16-core Windows machine, even after a one-line change. For look-only iterations, `[profile.quick]` (`inherits = "release"`, `lto = "thin"`, parallel): `cargo build --profile quick` takes 116 s the first time and 32 s after a change in `meadow`, and writes the exe to `target/quick/`. RAM and GPU numbers (`perf-baseline.md`) must still come from `--release`, so they stay comparable.
+
 `run.sh` kills any running `meadow.exe` (a running exe is locked), cross-builds, copies the exe to `/mnt/c/Users/d/pixel3d/` and launches it there with `--window`.
 
 On Windows the exe is the **wallpaper by default**; `--window`, `--screens` or `--fullscreen` make it windowed (`--wallpaper` is still accepted because old autostart entries pass it). Per-run args (not saved): `--fps 0|60|30|20|15` (0 = no cap, vsync), `--pixel-size 2|3|4`, `--hour H` (pin the sky, 0–24), `--cycle` (the web's 300 s day), `--date MM-DD`, `--toggle-clock S`, `--screens WxH+X+Y,...` (one window per fake monitor, first = primary, to check the seams), `--gpu-time`, `--fullscreen`. Bad values panic with the expected format. Logging is `env_logger` (`RUST_LOG` works; default `meadow=info,wgpu_core=warn,wgpu_hal=warn`).
