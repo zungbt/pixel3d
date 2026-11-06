@@ -11,3 +11,7 @@ docs/nic-vandewetering-channel-research.md
 docs/a-philosophy-of-software-design.md
 docs/media/
 docs/explainers/
+.claude/
+.superpowers/
+docs/architecture-schematic.html
+docs/rust-app-sad.html
