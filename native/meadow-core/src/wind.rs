@@ -11,6 +11,8 @@ use crate::weather::Weather;
 const EASE: f64 = 20.0; // s: the wind takes this long (1/e) to settle to new weather
 const CALM_KMH: f64 = 12.0; // the real wind that looks like the made-up one
 const HEADING: f64 = -std::f64::consts::FRAC_PI_4; // the made-up lean, toward +x -z
+pub const MAX_STRENGTH: f64 = 1.6; // the most `strength` and `flutter` ever reach (the culling's bounds)
+pub const MAX_FLUTTER: f64 = 2.5;
 
 /// Uploaded as globals.wind (lean, phase, strength) and params.w (flutter).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,8 +39,8 @@ impl Wind {
     pub fn update(&mut self, dt: f64, weather: Option<&Weather>) {
         let target = weather.map_or(Wind::default(), |w| Wind {
             phase: 0.0,
-            strength: (w.wind_kmh / CALM_KMH).clamp(0.35, 1.6),
-            flutter: ((w.gust_kmh - w.wind_kmh) / 8.0).clamp(0.5, 2.5),
+            strength: (w.wind_kmh / CALM_KMH).clamp(0.35, MAX_STRENGTH),
+            flutter: ((w.gust_kmh - w.wind_kmh) / 8.0).clamp(0.5, MAX_FLUTTER),
             heading: w.heading(),
         });
         let k = 1.0 - exp(-dt / EASE);

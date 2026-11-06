@@ -105,3 +105,25 @@ Release exe with `lto = true, strip = true`: 7,339,520 bytes (15,395,491 before)
 | SP4b | noon, pixel size 2 | 188 | 113 |
 | SP5 | noon, pixel size 2, post clock | 172–185 | 113–114 |
 | SP5 | dusk cycle, pixel size 4, fog always, clock hidden | 155 | 96 |
+
+### Off-screen culling (`feat/native-offscreen-cull`)
+
+Each view draws only the trees, rocks, pads, flowers and ground squares its pane can see (culled on resize), and puts into the shadow map only the casters its shadow camera reaches (culled every frame). Release exes built here with the msvc host toolchain (main `8d8091a` against the branch), Vulkan, NVIDIA, `--hour 12`, pixel size 3, 15 fps, fresh `%APPDATA%`. One screen = `--screens 852x480+852+0`. Three screens = `--screens 852x480+852+0,852x480+0+0,852x480+1704+0` (10 outer tiles, 10,076 instances). `--gpu-time` times **view 0 only**. View 0 is the primary, and before this change it also drew every other screen's tiles, so each of the other views saves about the same. Main and the branch ran back to back, with the same clouds, 4–6 five-second averages each (ms):
+
+| exe | screens | shadow | scene | instances drawn by view 0 |
+|---|---|---|---|---|
+| main | 1 | 0.21–0.24 | 0.32–0.33 | 2,098 |
+| culled | 1 | 0.22–0.24 | 0.30–0.31 | 895 |
+| main | 3 | 0.27–0.31 | 0.57–0.59 | 10,076 |
+| culled | 3 | 0.20–0.24 | 0.35–0.42 | 899 |
+
+RAM after 20–60 s (it settles within 5 s; no growth over 120 s):
+
+| exe | screens | working set (MB) | private (MB) |
+|---|---|---|---|
+| main | 1 | 119 | 96 |
+| culled | 1 | 119 | 97 |
+| main | 3 | 163–171 | 145–146 |
+| culled | 3 | 197–215 | 180–184 |
+
+The culled build uses +34–38 MB private with three screens and nothing extra with one. The cause is not found. It is not the per-frame shadow uploads (culling them once instead: still +37 MB), and it is not the per-view buffers' room for every instance (sizing them to what each view keeps: still +38 MB). Main with three screens was already past the SP1 target of 130 MB private.
