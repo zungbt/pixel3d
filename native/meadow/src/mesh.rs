@@ -19,15 +19,6 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
-impl MeshData {
-    /// Adds another mesh's triangles, so both go in one draw.
-    pub fn append(&mut self, other: MeshData) {
-        let base = self.vertices.len() as u32;
-        self.vertices.extend(other.vertices);
-        self.indices.extend(other.indices.into_iter().map(|i| i + base));
-    }
-}
-
 /// The terrain, with smooth normals (no faceted bands) and soft light/dark tint patches.
 pub fn ground() -> MeshData {
     use world::GROUND_SIZE;

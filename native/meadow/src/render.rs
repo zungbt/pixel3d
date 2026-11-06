@@ -10,7 +10,7 @@ use meadow_core::butterflies::{self, Butterflies};
 use meadow_core::clock;
 use meadow_core::clouds::{self, Clouds};
 use meadow_core::rain::Rain;
-use meadow_core::wind::Wind;
+use meadow_core::wind::{MAX_FLUTTER, MAX_STRENGTH, Wind};
 use meadow_core::weather::Weather;
 use meadow_core::dragonflies::{self, Dragonflies};
 use meadow_core::fireflies::{self, Fireflies};
@@ -118,9 +118,32 @@ impl Instance {
 
     /// In the grass's wind (IN_WIND in scene.wgsl); `color` already linear.
     fn in_wind(model: Mat4, color: Vec3) -> Self {
-        Self { model: model.to_cols_array_2d(), base: [0.0, 0.0, 0.0, -2.0], color: color.extend(1.0).into() }
+        Self { model: model.to_cols_array_2d(), base: [0.0, 0.0, 0.0, IN_WIND], color: color.extend(1.0).into() }
+    }
+
+    /// A world-space sphere holding every vertex of a mesh, `reach` around `middle` in its own
+    /// space, under this instance, however far the wind bends it.
+    fn bounds(&self, (middle, reach): (Vec3, f32)) -> (Vec3, f32) {
+        let m = Mat4::from_cols_array_2d(&self.model);
+        let centre = m.transform_point3(middle);
+        // The longest column: the models are a turn times a scale, so their columns stay square.
+        let r = reach * m.x_axis.truncate().length().max(m.y_axis.truncate().length()).max(m.z_axis.truncate().length());
+        let wind = if self.base[3] >= 0.0 {
+            SWAY_MAX * (centre.distance(Vec3::from_slice(&self.base[..3])) + r)
+        } else if self.base[3] == IN_WIND {
+            GUST_MAX * (middle.y.abs() + reach) // the gust grows with mesh-space height
+        } else {
+            0.0
+        };
+        (centre, r + wind)
     }
 }
+
+const IN_WIND: f32 = -2.0; // Instance::base.w, as scene.wgsl's
+// At the wind's strongest: the most a tree turns about its base (common.wgsl's model_matrix, two
+// small turns), and how far a flower head shifts per unit of mesh height (scene.wgsl's gust).
+const SWAY_MAX: f32 = ((0.02 + 0.035) * MAX_STRENGTH) as f32;
+const GUST_MAX: f32 = ((0.12 * MAX_STRENGTH + 0.02 * MAX_FLUTTER) / BLADE_H) as f32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -150,6 +173,76 @@ struct Draw {
     instance_count: u32,
     shade: Shade,
     casts_shadow: bool,
+}
+
+/// A part of the meadow that stays put (each ground square, the trees, rocks, pads, flowers): its
+/// instances kept here, so each view uploads only those its cameras can reach (Culled).
+struct Still {
+    draw: Draw, // without instances: each view has its own
+    instances: Vec<Instance>,
+    bounds: (Vec3, f32), // the mesh's: a sphere (mesh_bounds)
+}
+
+/// The instances of a Still that one of a view's cameras can reach.
+struct Culled {
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
+impl Culled {
+    /// Room for `room` instances, culled every frame.
+    fn new(device: &wgpu::Device, room: usize) -> Self {
+        let size = (room.max(1) * size_of::<Instance>()) as u64;
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("culled instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { instances, count: 0 }
+    }
+
+    /// Just the instances of `still` that the camera `clip` can reach, culled once, in a buffer
+    /// that size.
+    fn once(device: &wgpu::Device, still: &Still, clip: Mat4) -> Self {
+        let kept = reachable(&still.instances, still.bounds, clip);
+        if kept.is_empty() {
+            return Self::new(device, 0);
+        }
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("culled instances"),
+            contents: bytemuck::cast_slice(&kept),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        Self { instances, count: kept.len() as u32 }
+    }
+
+    /// Uploads the instances of `still` that the camera `clip` can reach.
+    fn cull(&mut self, queue: &wgpu::Queue, still: &Still, clip: Mat4) {
+        let kept = reachable(&still.instances, still.bounds, clip);
+        if !kept.is_empty() {
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&kept));
+        }
+        self.count = kept.len() as u32;
+    }
+}
+
+fn reachable(instances: &[Instance], mesh: (Vec3, f32), clip: Mat4) -> Vec<Instance> {
+    instances
+        .iter()
+        .filter(|inst| {
+            let (centre, r) = inst.bounds(mesh);
+            camera::sphere_in_ortho(clip, centre, r)
+        })
+        .copied()
+        .collect()
+}
+
+/// A sphere around the mesh's box: its middle, and its farthest vertex from there.
+fn mesh_bounds(mesh: &MeshData) -> (Vec3, f32) {
+    let points = || mesh.vertices.iter().map(|v| Vec3::from(v.pos));
+    let middle = (points().fold(Vec3::MAX, Vec3::min) + points().fold(Vec3::MIN, Vec3::max)) / 2.0;
+    (middle, points().map(|p| p.distance(middle)).fold(0.0, f32::max))
 }
 
 // The post clock: the post, rim and face stand still; the ticks and hands share one cube draw,
@@ -360,6 +453,8 @@ struct View {
     post_buf: wgpu::Buffer,
     targets: Targets,
     grass: Grass,
+    seen: Vec<Culled>,        // per Still: in the pane, culled on resize
+    lit: Vec<Option<Culled>>, // per Still casting a shadow: in the shadow camera, culled every frame
 }
 
 pub struct Renderer {
@@ -376,7 +471,7 @@ pub struct Renderer {
     grass_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     manual_srgb: bool,
-    draws: Vec<Draw>,
+    stills: Vec<Still>,
     views: Vec<View>,
     primary: (u32, u32), // the primary screen's size, which every pane is measured from
     butterflies: Butterflies,
@@ -550,17 +645,16 @@ fn upload(device: &wgpu::Device, mesh: MeshData, instances: &[Instance], shade: 
     }
 }
 
-// Every mesh in the meadow, as instanced draws: the inner world, then the outer tiles' (other
-// screens').
-fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers::Head], outer: &Outer, tiles: &[(i32, i32)]) -> Vec<Draw> {
+// Every mesh in the meadow that stays put, with its instances: the inner world, then the outer
+// tiles' (other screens').
+fn still_parts(layout: &world::Layout, flowers: &[flowers::Head], outer: &Outer, tiles: &[(i32, i32)]) -> Vec<(MeshData, Vec<Instance>, Shade, bool)> {
     log::info!("layout: {} trees, {} rocks, {} flowers", layout.trees.len(), layout.rocks.len(), flowers.len());
     if !tiles.is_empty() {
         log::info!("outer tiles {tiles:?}: {} trees, {} rocks, {} flowers", outer.trees.len(), outer.rocks.len(), outer.flowers.len());
     }
-    let mut ground = mesh::ground();
-    for &(i, j) in tiles {
-        ground.append(mesh::ground_square(i as f64 * TILE, j as f64 * TILE, TILE));
-    }
+    let ground = |mesh| (mesh, vec![Instance::new(Mat4::IDENTITY, GROUND)], Shade::Ground, false);
+    // A draw per outer tile's ground, so a pane can leave out the other screens'.
+    let squares = tiles.iter().map(|&(i, j)| ground(mesh::ground_square(i as f64 * TILE, j as f64 * TILE, TILE)));
     let pond = |lift: f64| Mat4::from_translation(Vec3::new(world::POND_X as f32, (world::shore_y() + lift) as f32, world::POND_Z as f32));
     let at = |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
     let trunks: Vec<_> = layout
@@ -603,16 +697,35 @@ fn build_draws(device: &wgpu::Device, layout: &world::Layout, flowers: &[flowers
         v.pos = (Vec3::from(v.pos) * HEAD_R as f32 + Vec3::Y * HEAD_Y as f32).into();
     }
     let heads: Vec<_> = flowers.iter().chain(&outer.flowers).map(|h| Instance::in_wind(at(h.x, h.y - HEAD_Y, h.z), linear(h.color) * h.shade as f32)).collect();
-    vec![
-        upload(device, ground, &[Instance::new(Mat4::IDENTITY, GROUND)], Shade::Ground, false),
-        upload(device, mesh::fan(world::sand_radius), &[Instance::new(pond(0.01), SAND)], Shade::Toon, false),
-        upload(device, mesh::fan(world::pond_radius), &[Instance::new(pond(0.02), 0xffffff)], Shade::Water, false),
-        upload(device, mesh::trunk(), &trunks, Shade::Toon, true),
-        upload(device, mesh::icosahedron(), &crowns, Shade::Toon, true),
-        upload(device, mesh::dodecahedron(), &rocks, Shade::Toon, true),
-        upload(device, mesh::sector(0.0, frog::PAD_R as f32, std::f32::consts::TAU - 0.5, 12), &pads, Shade::Toon, false),
-        upload(device, head, &heads, Shade::Toon, false),
-    ]
+    let mut parts = vec![
+        ground(mesh::ground()),
+        (mesh::fan(world::sand_radius), vec![Instance::new(pond(0.01), SAND)], Shade::Toon, false),
+        (mesh::fan(world::pond_radius), vec![Instance::new(pond(0.02), 0xffffff)], Shade::Water, false),
+        (mesh::trunk(), trunks, Shade::Toon, true),
+        (mesh::icosahedron(), crowns, Shade::Toon, true),
+        (mesh::dodecahedron(), rocks, Shade::Toon, true),
+        (mesh::sector(0.0, frog::PAD_R as f32, std::f32::consts::TAU - 0.5, 12), pads, Shade::Toon, false),
+        (head, heads, Shade::Toon, false),
+    ];
+    parts.extend(squares);
+    parts
+}
+
+fn upload_still(device: &wgpu::Device, (mesh, instances, shade, casts_shadow): (MeshData, Vec<Instance>, Shade, bool)) -> Still {
+    let bounds = mesh_bounds(&mesh);
+    Still { draw: upload(device, mesh, &[], shade, casts_shadow), instances, bounds }
+}
+
+/// Each screen's pane and art size (the first screen is the primary).
+fn panes(screens: &[Screen], pixel_size: u32) -> Vec<(Pane, (u32, u32))> {
+    let primary_art = art_size(screens[0].size.0, screens[0].size.1, pixel_size);
+    screens
+        .iter()
+        .map(|sc| {
+            let art = art_size(sc.size.0, sc.size.1, pixel_size);
+            (Pane::new(art, sc.offset, primary_art, pixel_size), art)
+        })
+        .collect()
 }
 
 /// The ground under a pane and PANE_REACH past it: where the world must have something.
@@ -820,14 +933,7 @@ impl Renderer {
         let n_gnats = gnats.poses().len();
         let blank = |n| vec![Instance::new(Mat4::IDENTITY, 0); n]; // posed before the first draw
         // The other screens look past the inner ground: the world grows tiles under them.
-        let primary_art = art_size(screens[0].size.0, screens[0].size.1, pixel_size);
-        let panes: Vec<(Pane, (u32, u32))> = screens
-            .iter()
-            .map(|sc| {
-                let art = art_size(sc.size.0, sc.size.1, pixel_size);
-                (Pane::new(art, sc.offset, primary_art, pixel_size), art)
-            })
-            .collect();
+        let panes = panes(screens, pixel_size);
         let footprints: Vec<[[f64; 2]; 4]> = panes.iter().map(|(pane, art)| footprint(*pane, *art)).collect();
         let tiles = tiles::needed(&footprints, 0.0);
         let start = std::time::Instant::now();
@@ -835,6 +941,7 @@ impl Renderer {
         let mut all_blades = blades::place_grass(&world_layout);
         log::info!("{} grass blades, {} more on {} outer tiles, placed in {:.0} ms", all_blades.len(), outer.blades.len(), tiles.len(), start.elapsed().as_secs_f64() * 1000.0);
         all_blades.append(&mut outer.blades);
+        let stills: Vec<Still> = still_parts(&world_layout, &flowers, &outer, &tiles).into_iter().map(|part| upload_still(device, part)).collect();
         let views = screens
             .iter()
             .zip(&panes)
@@ -859,7 +966,9 @@ impl Renderer {
                 // A little taller than now, so a new pixel size (which moves the art grid by less
                 // than an art pixel) still finds its rows.
                 let grass = Grass::new(device, &all_blades, pane, pane.half(art).y + 4.0 * pane.unit);
-                View { offset: sc.offset, art, pane, globals_group, targets: Self::targets(device, &binds, &post_buf, art, pane), globals_buf, post_buf, grass }
+                let seen = Vec::new(); // resize culls
+                let lit = stills.iter().map(|s| s.draw.casts_shadow.then(|| Culled::new(device, s.instances.len()))).collect();
+                View { offset: sc.offset, art, pane, globals_group, targets: Self::targets(device, &binds, &post_buf, art, pane), globals_buf, post_buf, grass, seen, lit }
             })
             .collect();
         drop(all_blades);
@@ -877,7 +986,7 @@ impl Renderer {
             grass_pipeline,
             post_pipeline,
             manual_srgb: !surface_format.is_srgb(),
-            draws: build_draws(device, &world_layout, &flowers, &outer, &tiles),
+            stills,
             views,
             primary: screens[0].size,
             butterfly_body: upload(device, mesh::cube(), &blank(butterflies::COUNT), Shade::Insect, false),
@@ -983,15 +1092,20 @@ impl Renderer {
             view.targets = Self::targets(device, &self.binds, &view.post_buf, art, pane);
         }
         view.grass.set_view(view.pane, view.art);
+        // The camera never moves: what the pane sees changes only here.
+        let clip = camera::projection(art, pane) * camera::view();
+        view.seen = self.stills.iter().map(|still| Culled::once(device, still, clip)).collect();
         let params = PostParams { art: [art.0, art.1], pixel_size: self.pixel_size, manual_srgb: self.manual_srgb as u32, rain: self.post_rain, label: [0.0; 4] };
         queue.write_buffer(&view.post_buf, 0, bytemuck::bytes_of(&params));
         log::info!(
-            "view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades drawn{}",
+            "view {i}: art {}x{} at pixel size {}, centre {:?}, {} grass blades and {} of {} other instances drawn{}",
             view.art.0,
             view.art.1,
             self.pixel_size,
             view.pane.centre,
             view.grass.count,
+            view.seen.iter().map(|s| s.count).sum::<u32>(),
+            self.stills.iter().map(|s| s.instances.len()).sum::<usize>(),
             if same { ", targets kept" } else { "" }
         );
     }
@@ -1111,10 +1225,17 @@ impl Renderer {
     /// View `i`'s frame into `out`: its own shadow pass (the shared map, centred on its pane),
     /// cloud map, scene and post.
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, i: usize, out: &wgpu::TextureView) {
+        // The shadow camera turns with the sun: what it reaches changes every frame.
+        let light = camera::light_view_proj(self.sun, self.views[i].pane.ground_centre());
+        for (still, lit) in self.stills.iter().zip(&mut self.views[i].lit) {
+            if let Some(lit) = lit {
+                lit.cull(queue, still, light);
+            }
+        }
         let view = &self.views[i];
         let globals = Globals {
             view_proj: (camera::projection(view.art, view.pane) * camera::view()).to_cols_array_2d(),
-            light_view_proj: camera::light_view_proj(self.sun, view.pane.ground_centre()).to_cols_array_2d(),
+            light_view_proj: light.to_cols_array_2d(),
             cloud_map: view.targets.cloud_map,
             ..self.globals
         };
@@ -1145,12 +1266,18 @@ impl Renderer {
                 },
             })
         };
-        let draw = |pass: &mut wgpu::RenderPass, d: &Draw| {
+        let draw = |pass: &mut wgpu::RenderPass, (d, instances, count): (&Draw, &wgpu::Buffer, u32)| {
+            if count == 0 {
+                return;
+            }
             pass.set_vertex_buffer(0, d.vertices.slice(..));
-            pass.set_vertex_buffer(1, d.instances.slice(..));
+            pass.set_vertex_buffer(1, instances.slice(..));
             pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..d.index_count, 0, 0..d.instance_count);
+            pass.draw_indexed(0..d.index_count, 0, 0..count);
         };
+        fn moving(d: &Draw) -> (&Draw, &wgpu::Buffer, u32) {
+            (d, &d.instances, d.instance_count)
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1163,7 +1290,8 @@ impl Renderer {
             });
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &view.globals_group, &[]);
-            for d in self.draws.iter().chain(&self.post_clock.draws).chain([&self.frog_draw]).filter(|d| d.casts_shadow) {
+            let stills = self.stills.iter().zip(&view.lit).filter_map(|(s, lit)| lit.as_ref().map(|lit| (&s.draw, &lit.instances, lit.count)));
+            for d in stills.chain(self.post_clock.draws.iter().chain([&self.frog_draw]).filter(|d| d.casts_shadow).map(moving)) {
                 draw(&mut pass, d);
             }
         }
@@ -1200,8 +1328,9 @@ impl Renderer {
             pass.set_bind_group(0, &view.globals_group, &[]);
             pass.set_bind_group(1, &view.targets.scene, &[]);
             let insects = [&self.frog_draw, &self.butterfly_body, &self.butterfly_wings, &self.dragonfly_body, &self.dragonfly_wings, &self.gnat_draw];
-            for d in self.draws.iter().chain(&self.post_clock.draws).chain(insects) {
-                pass.set_pipeline(match d.shade {
+            let stills = self.stills.iter().zip(&view.seen).map(|(s, seen)| (&s.draw, &seen.instances, seen.count));
+            for d in stills.chain(self.post_clock.draws.iter().chain(insects).map(moving)) {
+                pass.set_pipeline(match d.0.shade {
                     Shade::Toon => &self.toon_pipeline,
                     Shade::Ground => &self.ground_pipeline,
                     Shade::Water => &self.water_pipeline,
@@ -1215,7 +1344,7 @@ impl Renderer {
             pass.set_vertex_buffer(0, view.grass.instances.slice(..));
             pass.draw(0..3, 0..view.grass.count);
             pass.set_pipeline(&self.glow_pipeline);
-            draw(&mut pass, &self.firefly_draw);
+            draw(&mut pass, moving(&self.firefly_draw));
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1263,6 +1392,77 @@ mod tests {
                     assert!(uv.abs_diff_eq(Vec2::splat(0.5), 1e-4), "{uv}");
                 }
             }
+        }
+    }
+
+    type Parts = Vec<(MeshData, Vec<Instance>, Shade, bool)>;
+
+    // `--screens 852x480+852+0,852x480+0+0,852x480+1704+0`: three screens in a row, the primary in
+    // the middle. Their panes and the meadow's still parts, outer tiles included.
+    fn three_screens() -> (Vec<(Pane, (u32, u32))>, Parts) {
+        let size = (852, 480);
+        let screens = [Screen { offset: (0, 0), size }, Screen { offset: (-852, 0), size }, Screen { offset: (852, 0), size }];
+        let panes = panes(&screens, 3);
+        let footprints: Vec<_> = panes.iter().map(|&(pane, art)| footprint(pane, art)).collect();
+        let tiles = tiles::needed(&footprints, 0.0);
+        let layout = world::place(42);
+        let flowers = flowers::place_flowers(&layout);
+        let parts = still_parts(&layout, &flowers, &tiles::place_outer(&tiles), &tiles);
+        (panes, parts)
+    }
+
+    #[test]
+    fn a_still_instances_bounds_hold_its_mesh_however_the_wind_bends_it() {
+        let (_, parts) = three_screens();
+        // common.wgsl's sway, both turns at their extremes, and scene.wgsl's gust pushing every way.
+        let (a, b) = ((0.02 * MAX_STRENGTH) as f32, (0.035 * MAX_STRENGTH) as f32);
+        let gust = ((0.12 * MAX_STRENGTH + 0.02 * MAX_FLUTTER) / BLADE_H) as f32;
+        let turns: Vec<(f32, f32)> = [-a, 0.0, a].into_iter().flat_map(|x| [-b, 0.0, b].map(move |z| (x, z))).collect();
+        let pushes: Vec<Vec3> = (0..8).map(|k| Vec3::new(1.0, 0.0, 0.0).rotate_y(k as f32 * std::f32::consts::FRAC_PI_4) * gust).collect();
+        for (mesh, instances, ..) in &parts {
+            let bounds = mesh_bounds(mesh);
+            for inst in instances {
+                let (centre, r) = inst.bounds(bounds);
+                let m = Mat4::from_cols_array_2d(&inst.model);
+                let base = Vec3::from_slice(&inst.base[..3]);
+                let models: Vec<Mat4> = if inst.base[3] >= 0.0 {
+                    turns.iter().map(|&(x, z)| Mat4::from_translation(base) * Mat4::from_rotation_x(x) * Mat4::from_rotation_z(z) * Mat4::from_translation(-base) * m).collect()
+                } else {
+                    vec![m]
+                };
+                let pushes = if inst.base[3] == IN_WIND { &pushes[..] } else { &[Vec3::ZERO] };
+                for v in &mesh.vertices {
+                    let p = Vec3::from(v.pos);
+                    for model in &models {
+                        for push in pushes {
+                            let world = model.transform_point3(p) + *push * p.y;
+                            assert!(world.distance(centre) <= r + 1e-3, "vertex {world} out of {centre} r {r}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_and_its_shadow_camera_skip_the_other_screens_trees() {
+        let (panes, parts) = three_screens();
+        let (pane, art) = panes[0];
+        let clip = camera::projection(art, pane) * camera::view();
+        let (mesh, crowns, ..) = &parts[4];
+        let bounds = mesh_bounds(mesh);
+        let seen = reachable(crowns, bounds, clip).len();
+        assert!(seen > 0 && seen < crowns.len() / 2, "{seen} of {} crowns in the pane", crowns.len());
+        // The ground: the inner square and the outer tiles' (after the eight inner parts).
+        let squares: Vec<_> = parts.iter().filter(|p| matches!(p.2, Shade::Ground)).collect();
+        assert_eq!(squares.len(), 1 + parts.len() - 8);
+        let drawn = squares.iter().filter(|(mesh, instances, ..)| !reachable(instances, mesh_bounds(mesh), clip).is_empty()).count();
+        assert!(drawn >= 1 && drawn < squares.len(), "{drawn} of {} ground squares in the pane", squares.len());
+        // Morning, noon and evening sun (low long shadows reach in from further off), and the moon.
+        for (elevation, azimuth) in [(5.0_f64, 90.0_f64), (60.0, 180.0), (5.0, 270.0), (-40.0, 0.0)] {
+            let sun = sky::sky_at(0.3, elevation.to_radians(), azimuth.to_radians(), 0.0).sun_pos.map(|v| v as f32);
+            let lit = reachable(crowns, bounds, camera::light_view_proj(Vec3::from(sun), pane.ground_centre())).len();
+            assert!(lit > 0 && lit < crowns.len(), "sun at {elevation} {azimuth}: {lit} of {}", crowns.len());
         }
     }
 

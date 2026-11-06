@@ -77,6 +77,15 @@ pub fn light_view_proj(sun: Vec3, centre: Vec3) -> Mat4 {
     proj * look_at_mat4(sun + centre, centre, up)
 }
 
+/// Whether any of a world-space sphere can reach the box an orthographic `clip` keeps (x and y in
+/// -1..1, depth 0..1). The projection is affine, so the sphere reaches `radius` times row i's
+/// length along clip axis i.
+pub fn sphere_in_ortho(clip: Mat4, centre: Vec3, radius: f32) -> bool {
+    let c = clip.project_point3(centre);
+    let reach = |i| radius * clip.row(i).truncate().length();
+    c.x.abs() <= 1.0 + reach(0) && c.y.abs() <= 1.0 + reach(1) && c.z >= -reach(2) && c.z <= 1.0 + reach(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +135,28 @@ mod tests {
             for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
                 let z = proj.project_point3(ground_at(pane.centre + Vec2::new(sx * h.x, sy * h.y))).z;
                 assert!((0.05..0.95).contains(&z), "{offset:?} corner {sx},{sy}: depth {z}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sphere_is_kept_while_any_of_it_can_reach_the_cameras_box() {
+        let art = (640, 360);
+        let pane = Pane::new(art, (0, 0), art, 3);
+        let sun = Vec3::new(20.0, 10.0, -30.0);
+        for clip in [projection(art, pane) * view(), light_view_proj(sun, pane.ground_centre())] {
+            assert!(sphere_in_ortho(clip, Vec3::ZERO, 0.1), "the pane's centre");
+            assert!(!sphere_in_ortho(clip, Vec3::new(100.0, 0.0, 100.0), 1.0), "far off");
+            // From the box's middle, straight out across each face to `d` clip units past it: a
+            // sphere reaching `r` clip units that way is kept exactly while r >= d.
+            let middle = clip.inverse().project_point3(Vec3::new(0.0, 0.0, 0.5));
+            for (axis, to_face) in [(0, 1.0), (0, -1.0), (1, 1.0), (1, -1.0), (2, 0.5), (2, -0.5)] {
+                let row = clip.row(axis).truncate();
+                let (n, per_unit) = (row.normalize(), row.length()); // clip units per world unit along n
+                for (d, r, kept) in [(0.5, 0.6, true), (0.5, 0.4, false), (-0.2, 0.0, true)] {
+                    let centre = middle + n * (to_face + d * f32::signum(to_face)) / per_unit;
+                    assert_eq!(sphere_in_ortho(clip, centre, r / per_unit), kept, "axis {axis} face {to_face}: d {d} r {r}");
+                }
             }
         }
     }
