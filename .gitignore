@@ -1,2 +1,13 @@
 node_modules/
 dist/
+
+# local tools and unrelated notes, kept out of the repo
+.commandcode/
+.better-walkthrough/
+extension/
+scripts/lm-studio-scene-harness.mjs
+docs/ai-gpu-price-crash-*.md
+docs/nic-vandewetering-channel-research.md
+docs/a-philosophy-of-software-design.md
+docs/media/
+docs/explainers/
